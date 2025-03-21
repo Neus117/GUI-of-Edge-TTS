@@ -11,7 +11,7 @@
 
 </div>
 
-## :globe_showing_asia_australia: 功能 | Features
+## :earth_asia: 功能 | Features
 文字转语音。我用来练习口语的。
 
 <br><br>
