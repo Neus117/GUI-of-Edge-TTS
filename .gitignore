@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+# C extensions
+*.so
+# Distribution / packaging
+.Python
+build/   # 打包时的副产物，不需要
+develop-eggs/
+dist/   # 打包时的副产物，不需要
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+# 打包时的副产物，不需要
+.spec
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.edge-tts-env/   # 我的项目自定义了虚拟环境名
+edge-tts-env/   # 理由同上
