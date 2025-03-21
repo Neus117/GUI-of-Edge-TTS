@@ -12,20 +12,20 @@
 </div>
 
 ## :earth_asia: 功能 | Features
-文字转语音。我用来练习口语的。
+- 文字转语音。我用来练习口语的。
 
 <br>
 
-Text-to-Speech. I use it to practice my spoken English.
+- Text-to-Speech. I use it to practice my spoken English.
 
 <br><br>
 
 ## :bulb: 使用说明 | How to Use
-在 Releases 中下载并运行 `GUI-of-Edge-TTS.exe` 即可使用。
+- 在 Releases 中下载并运行 `GUI-of-Edge-TTS.exe` 即可使用。
 
 <br>
 
-Download and run `GUI-of-Edge-TTS.exe` from the Releases section to start using the program.
+- Download and run `GUI-of-Edge-TTS.exe` from the Releases section to start using the program.
 
 <br><br>
 
