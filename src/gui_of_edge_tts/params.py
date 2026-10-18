@@ -127,15 +127,35 @@ def describe(rate: str, volume: str, pitch: str) -> Optional[str]:
 
 
 def voice_suffix(short_name: str) -> str:
-    """所选语音的文件名后缀，例如 ``_en-US-AriaNeural``。
+    """所选语音的文件名后缀，例如 ``_en-US-Emma`` / ``_en-US-Emma-multi``。
 
-    用户 2026-10-18 定稿："默认命名要加上选择的语音，**语音后缀放在其他
-    后缀前面**"：``标题_en-US-AriaNeural_语速+20%.mp3``。
-    用 ``short_name`` 而不是显示名：它是程序里唯一的语音标识，也不含空格
-    与标点，直接放进文件名是安全的。
+    用户 2026-10-18 定稿的规则：
+
+    * 普通神经模型：去掉结尾的 ``Neural``——``en-US-EmmaNeural`` → ``_en-US-Emma``；
+    * 多语言神经模型：去掉 ``MultilingualNeural`` 再加 ``-multi``——
+      ``en-US-EmmaMultilingualNeural`` → ``_en-US-Emma-multi``。
+
+    为什么要区分：同一个人可能有普通与多语言两套模型，只写 ``Emma`` 会
+    把两种模型混成同一个名字。带地区前缀是为了避免不同语言的同名语音
+    撞在一起（``zh-CN-Xiaoxiao`` / ``ja-JP-Nanami``）。
+    不认识的命名原样保留，不猜。
     """
     value = (short_name or "").strip()
-    return f"_{value}" if value else ""
+    if not value:
+        return ""
+    base = value
+    multilingual = False
+    if base.endswith("MultilingualNeural"):
+        base = base[: -len("MultilingualNeural")]
+        multilingual = True
+    elif base.endswith("Neural"):
+        base = base[: -len("Neural")]
+    if not base:
+        # 只有模型名、没有语音名：不硬裁，原样保留更安全。
+        base = value
+        multilingual = False
+    tag = f"{base}-multi" if multilingual else base
+    return f"_{tag}"
 
 
 def filename_suffix(rate: str, volume: str, pitch: str) -> str:

@@ -122,7 +122,18 @@ class FilenameSuffixTests(unittest.TestCase):
         )
 
     def test_voice_suffix(self) -> None:
-        self.assertEqual(params.voice_suffix("en-US-AriaNeural"), "_en-US-AriaNeural")
+        # 普通神经模型：去掉结尾的 Neural
+        self.assertEqual(params.voice_suffix("en-US-AriaNeural"), "_en-US-Aria")
+        # 多语言神经模型：去掉 MultilingualNeural，再补 -multi
+        self.assertEqual(
+            params.voice_suffix("en-US-EmmaMultilingualNeural"), "_en-US-Emma-multi"
+        )
+        # 带方言段的 locale：只裁模型名
+        self.assertEqual(
+            params.voice_suffix("zh-CN-liaoning-XiaobeiNeural"), "_zh-CN-liaoning-Xiaobei"
+        )
+        # 不认识的命名原样保留
+        self.assertEqual(params.voice_suffix("en-US-Foo"), "_en-US-Foo")
         self.assertEqual(params.voice_suffix(""), "")
         self.assertEqual(params.voice_suffix("  "), "")
 
@@ -136,7 +147,7 @@ class FilenameSuffixTests(unittest.TestCase):
         name = text_mod.add_filename_suffix("标题.mp3", suffix)
         self.assertEqual(
             name,
-            "标题_en-US-AriaNeural_语速+20%_音量+100%_音调-10Hz.mp3",
+            "标题_en-US-Aria_语速+20%_音量+100%_音调-10Hz.mp3",
         )
 
 

@@ -152,8 +152,8 @@ Edge-TTS 把文字变成语音，并同时生成一份逐词对齐的字幕文�
              +20 表示高 20 赫兹
     三项留空或填 0 表示使用原声。
     超出范围会弹窗提示，并恢复为上一次的有效值。
-    默认文件名会先带上所选语音，再接改过的参数后缀
-    （如 _en-US-AriaNeural_语速+20%_音量+100%_音调-10Hz）。
+    默认文件名会先带上所选语音（多语言模型带 -multi，如 _en-US-Emma-multi），
+    再接改过的参数后缀（如 _语速+20%_音量+100%_音调-10Hz）。
 
 常见问题
     生成失败怎么办
@@ -195,8 +195,9 @@ Speech parameters (ranges)
               +20 means 20 Hz higher
     Leave a field blank or set it to 0 to keep the original voice.
     Out-of-range values show a warning and restore the last valid value.
-    The default file name starts with the chosen voice, then any changed
-    parameters (for example _en-US-AriaNeural_rate+20%_volume+100%_pitch-10Hz).
+    The default file name starts with the chosen voice (multilingual models get
+    -multi, e.g. _en-US-Emma-multi), then any changed parameters (for example
+    _en-US-Emma_rate+20%_volume+100%_pitch-10Hz).
 
 FAQ
     Generation failed
@@ -4549,11 +4550,15 @@ class Application:
         self.set_result_status("\n".join(lines), paths)
 
     def reveal_output_dir(self) -> None:
-        """「输出目录」按钮：在资源管理器里打开**产物所在目录**。
+        """「输出目录」按钮：**直接进入**产物所在目录（不是选中它）。
 
-        常驻按钮（用户定稿）：它不依赖"这一次生成成功"，任何时候都能点——
-        用户想找之前生成的音频时，不必先跑一次生成。
-        目录取"本次实际保存的位置"（生成过就用它），否则用设置里的默认目录。
+        用户 2026-10-18 定稿："现在的逻辑是打开资源管理器、然后帮你选中那个
+        文件夹；不够直观，应该直接打开并进入这个输出文件夹。"
+
+        常驻按钮：不依赖"这一次生成成功"，任何时候都能点——用户想找之前生成
+        的音频时，不必先跑一次生成。目录取"本次实际保存的位置"（生成过就用
+        它），否则用设置里的默认目录。哪怕这次选的是文件，也进入它所在的
+        文件夹；"打开音频"那颗按钮才负责打开文件。
         """
         from pathlib import Path as _Path  # pylint: disable=import-outside-toplevel
 
@@ -4572,7 +4577,9 @@ class Application:
                 "warning",
             )
             return
-        platform_win.reveal_in_explorer(str(folder), select=path.is_file())
+        # `select=False` → `os.startfile(folder)`：资源管理器**进入**这个目录。
+        # 不要传 `select=True`：那会在父目录里选中它，用户还得再点一次。
+        platform_win.reveal_in_explorer(str(folder), select=False)
 
     def choose_output_dir(self) -> None:
         """「选择…」按钮：选默认输出目录（原来在设置窗口里的那个）。"""

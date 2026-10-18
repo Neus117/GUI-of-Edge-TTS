@@ -614,8 +614,8 @@ DLL 只补包根目录，Tcl/Tk 数据交给 PyInstaller 6 的 hook（`_tcl_data
   - 设置窗口关闭后按新语言重开（代理值已实时保存，不丢）；
   - 使用提示窗口按新语言重建。
 - `params` / `text` / `voices` / `engine` 的用户可见错误与单位也使用 L；
-  文件名后缀在英文下变成 `_rate+20%` 这类形式。语音短名不翻译，始终排在
-  参数后缀之前（`_en-US-AriaNeural_rate+20%`）。
+  文件名后缀在英文下变成 `_rate+20%` 这类形式。语音后缀不翻译，始终排在
+  参数后缀之前（`_en-US-Aria_rate+20%`；多语言模型是 `_en-US-Aria-multi`）。
 - 语言切换时 `retranslate()` 外面套 `platform_win.suspend_redraw(root)`：
   用 Windows `LockWindowUpdate` 把整段更新冻结成一帧，解锁后整棵树
   `RedrawWindow` 一次，避免按钮改宽时旧像素从缝隙里闪出。
@@ -674,8 +674,11 @@ asyncio 终结器排一个 `athrow` 任务去关，而这时 `loop.close()` 已�
 
 ### 14.3 默认文件名带上所选语音（用户定稿）
 
-规则：`标题_<语音短名>_<参数后缀>.mp3`，语音后缀在参数后缀**之前**。
-例：`End like ..._en-US-EmmaMultilingualNeural_语速+30%.mp3`。
+规则：`标题_<语音后缀><参数后缀>.mp3`，语音后缀在参数后缀**之前**。
+语音后缀的写法（用户定稿）：普通神经模型去掉结尾的 `Neural`
+（`en-US-EmmaNeural` → `_en-US-Emma`）；多语言模型去掉 `MultilingualNeural`
+再补 `-multi`（`en-US-EmmaMultilingualNeural` → `_en-US-Emma-multi`）。
+例：`End like ..._en-US-Emma-multi_语速+30%.mp3`。
 语音短名不翻译；参数后缀仍随界面语言（`_语速+20%` / `_rate+20%`）。
 实现：`params.voice_suffix(short_name)` + `start_generation` 里拼接。
 测试：`test_voice_suffix_comes_before_parameter_suffix`。
@@ -694,3 +697,4 @@ asyncio 终结器排一个 `athrow` 任务去关，而这时 `loop.close()` 已�
 - 多显示器：弹窗按显示器 work area 夹取；图标按窗口 DPI 取尺寸并缓存 HICON。
 
 单测 177 条；12 项门禁全过（含联网 e2e）。
+
