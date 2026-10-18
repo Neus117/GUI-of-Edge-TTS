@@ -106,7 +106,7 @@ the `?` button in the top-right, or `Ctrl+H`.
 | Limitation | Status |
 |---|---|
 | **Needs a network** | Synthesis is online; there is no offline mode |
-| **Buttons are not truly rounded** | Tk cannot draw rounded corners; the visual spec's `radius_button = 8` is approximated here with a 1-pixel outline and padding. **This is a trade-off, not an impossibility** — real rounded corners would mean rewriting buttons, fields and focus rings for little gain |
+| **Native drop-downs are system-drawn** | The voice/filter drop-downs are still ttk controls, so the open list follows the system; buttons, switches, scrollbars and progress bars are self-drawn and antialiased |
 | **Native dialogs follow the system theme** | The save/open dialog is drawn by Windows. The program matches its title bar, but the dialog body follows the system setting rather than this program's light/dark switch |
 | **Chinese punctuation is converted** | `。，！？` and friends are turned into ASCII punctuation before synthesis, because the upstream service segments full-width punctuation worse. Subtitles therefore use ASCII punctuation |
 | **One audio file per run** | There is no batch queue; run it again for another file |
