@@ -47,7 +47,7 @@ def _parse_number(raw: str, field: str, label: str, unit: str) -> int:
             number = text[:-1].strip() if text.endswith("x") else text[:-1].strip()
             try:
                 value = round((float(number) - 1.0) * 100)
-            except ValueError:
+            except (ValueError, OverflowError):
                 raise ParameterError(
                     field, L(f"{label}无法识别：{raw!r}", f"Unrecognized {label}: {raw!r}")
                 ) from None
@@ -61,7 +61,11 @@ def _parse_number(raw: str, field: str, label: str, unit: str) -> int:
         text = text[1:]
     try:
         return int(round(float(text)))
-    except ValueError:
+    except (ValueError, OverflowError):
+        # ⚠️ `float("inf")` / `"1e400"` 能过 `float()`，但 `round()` 会抛
+        # `OverflowError`——只接 `ValueError` 时它会一路冒到界面外：
+        # 源码运行是一段 Tk traceback，冻结成 windowed exe 之后
+        # 只是"点了生成没反应"（stderr 已被静音）。
         raise ParameterError(
             field, L(f"{label}无法识别：{raw!r}", f"Unrecognized {label}: {raw!r}")
         ) from None
@@ -120,6 +124,18 @@ def describe(rate: str, volume: str, pitch: str) -> Optional[str]:
     if pitch not in ("", "+0Hz"):
         parts.append(L(f"音调 {pitch}", f"Pitch {pitch}"))
     return " · ".join(parts) if parts else None
+
+
+def voice_suffix(short_name: str) -> str:
+    """所选语音的文件名后缀，例如 ``_en-US-AriaNeural``。
+
+    用户 2026-10-18 定稿："默认命名要加上选择的语音，**语音后缀放在其他
+    后缀前面**"：``标题_en-US-AriaNeural_语速+20%.mp3``。
+    用 ``short_name`` 而不是显示名：它是程序里唯一的语音标识，也不含空格
+    与标点，直接放进文件名是安全的。
+    """
+    value = (short_name or "").strip()
+    return f"_{value}" if value else ""
 
 
 def filename_suffix(rate: str, volume: str, pitch: str) -> str:

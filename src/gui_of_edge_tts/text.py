@@ -769,28 +769,41 @@ SPEECH_CJK_PER_MINUTE = 240.0
 #: 比读得快一点点，因为 Azure 的默认语速偏轻快。
 SPEECH_LATIN_PER_MINUTE = 165.0
 
+#: 计数用的两个模式**只编译一次**。它们跑在"每敲一个键"的处理链上
+#: （`ui._update_counts`），而且原来 `describe_length` 与 `estimate_seconds`
+#: 各写了一份同样的正则——大文本下每次都要重扫好几遍。
+#: **一个概念只有一个权威来源**：字数与时长的计数都从这里取。
+_WORD_UNIT = re.compile(r"[A-Za-z0-9\u00c0-\u024f]+(?:['’-][A-Za-z0-9]+)*")
+_CJK_UNIT = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
-def estimate_seconds(text: str) -> float:
-    """按语言分别估算朗读时长（秒）。
 
-    中文按汉字数、英文按词数，各自用自己的语速——**这是两套算法，
+def count_units(text: str) -> tuple:
+    """一次拿到 ``(汉字数, 拉丁词数)``；两遍扫描，不再按调用点各扫一遍。"""
+    return len(_CJK_UNIT.findall(text)), len(_WORD_UNIT.findall(text))
+
+
+def seconds_from_counts(language: str, cjk_characters: int, latin_words: int) -> float:
+    """按语言把已数好的单位换算成朗读秒数。
+
+    中文（与混排）按"汉字 + 拉丁词"，英文按"拉丁词"——**这是两套算法，
     不是一个公式换系数**，因为"一个单位该数什么"本身就不同。
     """
-    if not text.strip():
-        return 0.0
-    language = language_of(text)
     if language == "en":
-        rate = SPEECH_LATIN_PER_MINUTE
-        units = len(re.findall(r"[A-Za-z0-9\u00c0-\u024f]+(?:['’-][A-Za-z0-9]+)*", text))
+        units, rate = latin_words, SPEECH_LATIN_PER_MINUTE
     else:
-        # 中文与混合：汉字数 + 拉丁词数（英文单词也算进去），按中文语速读
-        rate = SPEECH_CJK_PER_MINUTE
-        cjk = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
-        latin = len(re.findall(r"[A-Za-z0-9\u00c0-\u024f]+(?:['’-][A-Za-z0-9]+)*", text))
-        units = cjk + latin
+        units, rate = cjk_characters + latin_words, SPEECH_CJK_PER_MINUTE
     if units <= 0:
         return 0.0
     return units / rate * 60.0
+
+
+def estimate_seconds(text: str) -> float:
+    """按语言分别估算朗读时长（秒）。"""
+    if not text.strip():
+        return 0.0
+    language = language_of(text)
+    cjk_characters, latin_words = count_units(text)
+    return seconds_from_counts(language, cjk_characters, latin_words)
 
 
 def describe_length(text: str) -> str:
@@ -802,14 +815,13 @@ def describe_length(text: str) -> str:
     if not text.strip():
         return L("0 字", "0 characters")
     language = language_of(text)
+    cjk_characters, latin_words = count_units(text)
     parts: list = []
     if language == "en":
-        words = len(re.findall(r"[A-Za-z0-9\u00c0-\u024f]+(?:['’-][A-Za-z0-9]+)*", text))
-        parts.append(L(f"{words:,} 词", f"{words:,} words"))
+        parts.append(L(f"{latin_words:,} 词", f"{latin_words:,} words"))
     else:
-        characters = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
-        parts.append(L(f"{characters:,} 字", f"{characters:,} characters"))
-    seconds = estimate_seconds(text)
+        parts.append(L(f"{cjk_characters:,} 字", f"{cjk_characters:,} characters"))
+    seconds = seconds_from_counts(language, cjk_characters, latin_words)
     if seconds >= 1.0:
         parts.append(L(f"约 {seconds:.0f} 秒语音", f"~{seconds:.0f} sec speech"))
     return " · ".join(parts)

@@ -39,6 +39,22 @@ class RateTests(unittest.TestCase):
         with self.assertRaises(params.ParameterError):
             params.parse_rate("-500")
 
+    def test_rejects_infinity_and_overflow(self) -> None:
+        """`inf` / `1e400` 能过 `float()`，但 `round()` 抛 `OverflowError`。
+
+        回归判据：这三种写法都必须变成**用户看得懂的 ParameterError**，
+        不能把 `OverflowError` 冒到界面外（冻结态下就是"点了没反应"）。
+        """
+        for raw in ("inf", "-inf", "nan", "1e400", "1e309%"):
+            with self.assertRaises(params.ParameterError):
+                params.parse_rate(raw)
+            with self.assertRaises(params.ParameterError):
+                params.parse_volume(raw)
+            with self.assertRaises(params.ParameterError):
+                params.parse_pitch(raw)
+        with self.assertRaises(params.ParameterError):
+            params.parse_rate("infx")
+
     def test_error_names_the_field(self) -> None:
         try:
             params.parse_rate("nope")
@@ -103,6 +119,24 @@ class FilenameSuffixTests(unittest.TestCase):
         self.assertEqual(
             params.filename_suffix("+20%", "+100%", "-10Hz"),
             "_语速+20%_音量+100%_音调-10Hz",
+        )
+
+    def test_voice_suffix(self) -> None:
+        self.assertEqual(params.voice_suffix("en-US-AriaNeural"), "_en-US-AriaNeural")
+        self.assertEqual(params.voice_suffix(""), "")
+        self.assertEqual(params.voice_suffix("  "), "")
+
+    def test_voice_suffix_comes_before_parameter_suffix(self) -> None:
+        """用户 2026-10-18 定稿：语音后缀在参数后缀**前面**。"""
+        from gui_of_edge_tts import text as text_mod
+
+        suffix = params.voice_suffix("en-US-AriaNeural") + params.filename_suffix(
+            "+20%", "+100%", "-10Hz"
+        )
+        name = text_mod.add_filename_suffix("标题.mp3", suffix)
+        self.assertEqual(
+            name,
+            "标题_en-US-AriaNeural_语速+20%_音量+100%_音调-10Hz.mp3",
         )
 
 

@@ -18,6 +18,7 @@ import queue
 import re
 import threading
 import tkinter as tk
+import traceback
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
@@ -151,8 +152,8 @@ Edge-TTS 把文字变成语音，并同时生成一份逐词对齐的字幕文�
              +20 表示高 20 赫兹
     三项留空或填 0 表示使用原声。
     超出范围会弹窗提示，并恢复为上一次的有效值。
-    改过参数时，默认文件名会自动带上对应后缀
-    （如 _语速+20%_音量+100%_音调-10Hz）。
+    默认文件名会先带上所选语音，再接改过的参数后缀
+    （如 _en-US-AriaNeural_语速+20%_音量+100%_音调-10Hz）。
 
 常见问题
     生成失败怎么办
@@ -194,8 +195,8 @@ Speech parameters (ranges)
               +20 means 20 Hz higher
     Leave a field blank or set it to 0 to keep the original voice.
     Out-of-range values show a warning and restore the last valid value.
-    Changed parameters are appended to the default file name
-    (for example _rate+20%_volume+100%_pitch-10Hz).
+    The default file name starts with the chosen voice, then any changed
+    parameters (for example _en-US-AriaNeural_rate+20%_volume+100%_pitch-10Hz).
 
 FAQ
     Generation failed
@@ -841,6 +842,12 @@ class Application:
         #: 代理输入防抖：保存配置 / 重拉语音列表。
         self._proxy_save_id: Optional[str] = None
         self._proxy_reload_id: Optional[str] = None
+        #: 字数统计防抖。**不能每个按键都整段数一遍**：30 万字一次要 40ms，
+        #: 挂在 `<KeyRelease>` 上就是每敲一个字卡一下（方向键也算）。
+        self._counts_after_id: Optional[str] = None
+        #: 启动后空闲时预热按钮位图（禁用态/悬停态）；见 `_start_prewarm`。
+        self._prewarm_after_id: Optional[str] = None
+        self._prewarm_queue: list = []
         self._voice_reload_pending = False
         self.generating = False
         self.result_paths: List[str] = []
@@ -911,9 +918,111 @@ class Application:
         self.root.after(200, self._fix_voice_width)
         self.root.after(150, lambda: self._set_window_icon(self.root))
         self.root.after(80, self._drain_events)
+        # 首帧稳定后（空闲时）再预热按钮位图：**不在启动路径上同步做**，
+        # 用户点「生成语音」时就能直接命中缓存。
+        self._prewarm_after_id = self.root.after(800, self._start_prewarm)
         # 首帧布局稳定后记下"用户期望的编辑区高度"——它是这个窗口的基准，
         # 之后每次要在下方多显示一行，都靠加高窗口来腾地方，**不动编辑区**。
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ------------------------------------------------------------ 悬停提示文案
+    #
+    # ⚠️ **一份文案只有一个来源。** 原来创建控件时写一份、`_refresh_tooltips`
+    # 又写一份，两份长度不同：切一次界面语言之后，语速/音量提示里的
+    # "可填 20、+20%、1.2x" 与 "+100% 约 +3.5 dB" 就消失了。
+    # 现在两处都走 `_tooltip_text(key)`。
+
+    def _tooltip_text(self, key: str) -> str:
+        texts = {
+            "theme_system": L("主题：跟随系统", "Theme: system"),
+            "theme_light": L("主题：浅色", "Theme: light"),
+            "theme_dark": L("主题：深色", "Theme: dark"),
+            "settings": L("设置", "Settings"),
+            "help": L("使用提示（Ctrl+H）", "Help (Ctrl+H)"),
+            "rate": L(
+                "语速范围 -100 到 +200（%）；可填 20、+20%、1.2x",
+                "Rate range -100 to +200 (%); 20, +20%, 1.2x accepted",
+            ),
+            "volume": L(
+                "音量范围 -100 到 +100（%）；相对原声，+100% 约 +3.5 dB",
+                "Volume range -100 to +100 (%); relative, +100% is about +3.5 dB",
+            ),
+            "pitch": L("音调范围 -100 到 +100（Hz）", "Pitch range -100 to +100 (Hz)"),
+        }
+        return texts[key]
+
+    def _make_tooltip(self, widget, key: str) -> Tooltip:
+        tip = Tooltip(widget, self._tooltip_text(key), self.theme)
+        tip.key = key  # type: ignore[attr-defined] - 供 `_refresh_tooltips` 重新取文案
+        return tip
+
+    # ------------------------------------------------------------ 按钮位图预热
+    #
+    # 自绘按钮的每套配色都是一张**2× 超采样**位图，第一次用到时现栅格化：
+    # 240x58 约 148 ms，普通按钮 40~100 ms。禁用态（点生成的那一下）与
+    # 悬停态（第一次划过按钮）都是"从未画过"的新配色，于是：
+    #   * 第一次点「生成语音」实测 280~370 ms（set_enabled 102 ms +
+    #     _set_inputs_enabled 185 ms + 布局 78 ms），第二次只要 25 ms；
+    #   * 第一次悬停每颗按钮各卡一下（文档里记过"首次 hover 约 80 ms"）。
+    #
+    # 这里在窗口稳定后**按一颗按钮一步**地预热，每步之间让出事件循环：
+    # 启动速度不受影响（不同步做），界面也不会被一次性占满。
+
+    def _start_prewarm(self) -> None:
+        self._prewarm_after_id = None
+        if self._closing:
+            return
+        queue: list = []
+        for button in self._collect_buttons(self.root):
+            queue.append((button, False, False))   # 禁用态
+            queue.append((button, True, True))     # 悬停态
+        self._prewarm_queue = queue
+        self._prewarm_step()
+
+    def _prewarm_step(self) -> None:
+        self._prewarm_after_id = None
+        if self._closing:
+            self._prewarm_queue = []
+            return
+        while self._prewarm_queue:
+            button, enabled, hover = self._prewarm_queue.pop(0)
+            self._prewarm_button_map(button, enabled, hover)
+            self._prewarm_after_id = self.root.after(20, self._prewarm_step)
+            return
+
+    @staticmethod
+    def _prewarm_button_map(button, enabled: bool, hover: bool) -> None:
+        """把 `FlatButton._paint` 会用到的那张位图先放进缓存。"""
+        theme = getattr(button, "theme", None)
+        if theme is None:
+            return
+        try:
+            width = int(button.winfo_width())
+            height = int(button.winfo_height())
+        except tk.TclError:
+            return
+        if width <= 8 or height <= 8:
+            return
+        palette = theme.palette
+        if not enabled:
+            fill, border = palette.background, palette.border
+        elif getattr(button, "kind", "neutral") == "accent":
+            fill = border = palette.accent_hover
+        else:
+            fill, border = palette.surface_hover, palette.border_strong
+        try:
+            raster.cached_rounded_rect(
+                width,
+                height,
+                theme.px(button.RADIUS),
+                fill,
+                border,
+                max(1, theme.px(1)),
+                background=palette.background,
+                supersample=2,
+            )
+        except Exception:  # noqa: BLE001 - 预热失败不影响任何功能
+            return
 
     # ------------------------------------------------------------------ 构建
 
@@ -1060,11 +1169,11 @@ class Application:
         self.help_button.grid(row=0, column=5, sticky="e", padx=(self._gap_compact, 0))
 
         self.tooltips = [
-            Tooltip(self.theme_buttons["system"], L("主题：跟随系统", "Theme: system"), self.theme),
-            Tooltip(self.theme_buttons["light"], L("主题：浅色", "Theme: light"), self.theme),
-            Tooltip(self.theme_buttons["dark"], L("主题：深色", "Theme: dark"), self.theme),
-            Tooltip(self.settings_button, L("设置", "Settings"), self.theme),
-            Tooltip(self.help_button, L("使用提示（Ctrl+H）", "Help (Ctrl+H)"), self.theme),
+            self._make_tooltip(self.theme_buttons["system"], "theme_system"),
+            self._make_tooltip(self.theme_buttons["light"], "theme_light"),
+            self._make_tooltip(self.theme_buttons["dark"], "theme_dark"),
+            self._make_tooltip(self.settings_button, "settings"),
+            self._make_tooltip(self.help_button, "help"),
         ]
 
         # ---- 设置卡片 ------------------------------------------------------
@@ -1140,27 +1249,9 @@ class Application:
             )
         self.tooltips.extend(
             [
-                Tooltip(
-                    self.rate_entry,
-                    L(
-                        "语速范围 -100 到 +200（%）；可填 20、+20%、1.2x",
-                        "Rate range -100 to +200 (%); 20, +20%, 1.2x accepted",
-                    ),
-                    self.theme,
-                ),
-                Tooltip(
-                    self.volume_entry,
-                    L(
-                        "音量范围 -100 到 +100（%）；相对原声，+100% 约 +3.5 dB",
-                        "Volume range -100 to +100 (%); relative, +100% is about +3.5 dB",
-                    ),
-                    self.theme,
-                ),
-                Tooltip(
-                    self.pitch_entry,
-                    L("音调范围 -100 到 +100（Hz）", "Pitch range -100 to +100 (Hz)"),
-                    self.theme,
-                ),
+                self._make_tooltip(self.rate_entry, "rate"),
+                self._make_tooltip(self.volume_entry, "volume"),
+                self._make_tooltip(self.pitch_entry, "pitch"),
             ]
         )
 
@@ -1265,7 +1356,7 @@ class Application:
         )
 
         self.choose_dir_button = FlatButton(
-            self.directory_row, L("选择…", "Pick"), self.choose_output_dir, kind="neutral",
+            self.directory_row, L("选择…", "Pick..."), self.choose_output_dir, kind="neutral",
             pad_x=SPACE_4, pad_y=SPACE_2, min_chars=2,
         )
         self.choose_dir_button.grid(row=0, column=0, sticky="w")
@@ -2109,8 +2200,39 @@ class Application:
             self.settings.proxy = proxy_var.get().strip()
         try:
             self.settings.save()
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
+            # `UnicodeError`：配置里出现孤立代理项时 UTF-8 写不进去。
+            # 只接 OSError 的话这种情况会静默失败（状态栏什么都没有）。
             self.set_status(L(f"设置无法保存：{exc}", f"Could not save settings: {exc}"), "error")
+
+    def open_config_location(self) -> None:
+        """设置窗口的「配置文件」：打开配置目录，文件存在时顺便选中它。
+
+        ⚠️ **目录不存在时必须先建出来**：`Settings.load()` 从不 mkdir，启动也
+        不保存设置，所以全新安装点这颗按钮原本什么都不会发生
+        ——`os.startfile` 对不存在的目录抛 `OSError`，而返回值被忽略了。
+        """
+        path = config_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.show_error(
+                L("打不开配置目录", "Cannot open the settings folder"),
+                L(
+                    f"这个目录建不出来：\n{path.parent}\n{exc}",
+                    f"Could not create this folder:\n{path.parent}\n{exc}",
+                ),
+            )
+            return
+        if platform_win.reveal_in_explorer(str(path), select=path.exists()):
+            return
+        self.show_error(
+            L("打不开配置目录", "Cannot open the settings folder"),
+            L(
+                f"没能打开这个位置：\n{text_mod.display_path(str(path.parent))}",
+                f"Could not open this location:\n{text_mod.display_path(str(path.parent))}",
+            ),
+        )
 
     def _restore_settings_to_widgets(self) -> None:
         for field, entry, value in (
@@ -2369,7 +2491,9 @@ class Application:
                     self.text.tag_remove("placeholder", "1.0", tk.END)
                 self._placeholder_active = False
                 self.text.edit_modified(False)
-        self._update_counts()
+        # 字数/时长统计走防抖（见下方"字数统计的防抖"）：大文档里每敲一个键
+        # 都整段数一遍会明显发涩。状态/产物按钮仍然是**同步**判断，不受影响。
+        self._schedule_counts()
         # 内容变了 → 撤掉"编辑区已清空 / 已读入 X"这类旧状态
         self._clear_editor_status()
         # 内容变了 → 上一轮生成的那两个按钮**也必须消失**：
@@ -2377,6 +2501,39 @@ class Application:
         # （用户实测："跑完一条后改动或清空编辑区，打开音频/所在文件夹
         # 没消失也点不动"）。
         self._hide_results_if_stale()
+
+    # ---- 字数统计的防抖 ----------------------------------------------------
+    #
+    # `_update_counts` 要整段读文本、跑几遍正则。实测（168 DPI、真实窗口）：
+    #   1 万字 1.6ms / 10 万字 13ms / 30 万字 41ms
+    # 它原来直接挂在 `<KeyRelease>` 上，**每敲一个键都跑**——包括方向键、
+    # 修饰键这种根本没改内容的按键。大文档里打字会明显发涩。
+    #
+    # 现在：按键只**排一次** 120ms 的延迟统计；连续打字会被合并成一次。
+    # 状态栏的计数晚 120ms 更新，用户看不出差别；内容一变就过时的是
+    # "编辑区状态"与产物按钮，那两条仍然是同步的。
+
+    def _schedule_counts(self) -> None:
+        if self._closing or self._counts_after_id is not None:
+            return
+        try:
+            self._counts_after_id = self.root.after(120, self._run_scheduled_counts)
+        except tk.TclError:
+            self._counts_after_id = None
+
+    def _run_scheduled_counts(self) -> None:
+        self._counts_after_id = None
+        if not self._closing:
+            self._update_counts()
+
+    def _cancel_scheduled_counts(self) -> None:
+        if self._counts_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._counts_after_id)
+        except tk.TclError:
+            pass
+        self._counts_after_id = None
 
     def _hide_results_if_stale(self) -> None:
         """当前文案与"已生成的那份"不一致时，撤掉产物按钮。
@@ -2767,7 +2924,12 @@ class Application:
         算法在 `text_mod.describe_length` 里——**单位和语速都随语言变**，
         因为"一个单位该数什么"本身就不同（英文按字符数会虚高两三倍，
         中文按词数又数不出东西）。
+
+        大文本的代价主要在这里：30 万字约 40ms。所以按键路径走
+        :meth:`_schedule_counts`，只有"内容确实定下来了"的场合
+        （读入文件、清空、换主题/语言、防抖到点）才立即算一次。
         """
+        self._cancel_scheduled_counts()
         content = self.get_text()
         pieces = (
             [text_mod.describe_length(content)]
@@ -2778,15 +2940,18 @@ class Application:
         if parts > 1:
             pieces.append(L(f"将分 {parts} 次请求", f"Will use {parts} requests"))
         self.counts_label.configure(text=" · ".join(pieces))
-        self._update_tip()
+        # 同一份内容只读一次：`_update_tip` 原来自己又调了一次 `get_text()`。
+        self._update_tip(content)
 
-    def _update_tip(self) -> None:
+    def _update_tip(self, content: Optional[str] = None) -> None:
         """编辑区下面那行提示。
 
         **提示语长度是排版问题**：这里只放三条之内、点得出结果的短句，
         完整的说明在「?」那个窗口里（否则窄窗口下会被截断）。
         """
-        if self._placeholder_active or not self.get_text():
+        if content is None:
+            content = self.get_text()
+        if self._placeholder_active or not content:
             text = L(
                 "Ctrl+Enter 生成 · Ctrl+O 读入文件 · Ctrl+H 全部提示",
                 "Ctrl+Enter generate · Ctrl+O open file · Ctrl+H all tips",
@@ -2994,8 +3159,16 @@ class Application:
                 0, colour, None,
             ),
         ]
-        png = raster.rasterise(primitives, side, side)
-        photo = tk.PhotoImage(master=parent, data=png)
+        # 位图缓存：同样的形状/颜色/尺寸只栅格化一次。实测这张 80px 的图标
+        # 每次 **142.7 ms**（97px 时 205 ms），而每个警告/错误/确认弹窗都会
+        # 现画一遍——弹窗因此比应有时间晚 0.14 秒才出现。
+        png = raster.cached_rasterise(primitives, side, side)
+        key = (side, colour)
+        cached = getattr(self, "_dialog_icon_cache", None)
+        if cached is None or cached[0] != key:
+            cached = (key, tk.PhotoImage(master=parent, data=png))
+            self._dialog_icon_cache = cached
+        photo = cached[1]
         label = tk.Label(
             parent,
             image=photo,
@@ -3026,7 +3199,26 @@ class Application:
             line = ""
             pending_space = False
             break_at = -1
+            tokens: list = []
             for token in _DIALOG_TOKEN.findall(paragraph):
+                if not token.isspace() and font.measure(token) > max_width:
+                    # **单个词比一行还宽**（长路径、没有分隔符的数据）：
+                    # 不切开的话它整行放不下，Label 的请求宽度会把弹窗撑到
+                    # 屏幕那么宽（实测 200 字符的路径 → 203 字符一行）。
+                    # 按字符切成不超过一行的块；路径被换行显示，但弹窗不再变形。
+                    current = ""
+                    for char in token:
+                        candidate = current + char
+                        if current and font.measure(candidate) > max_width:
+                            tokens.append(current)
+                            current = char
+                        else:
+                            current = candidate
+                    if current:
+                        tokens.append(current)
+                else:
+                    tokens.append(token)
+            for token in tokens:
                 if token.isspace():
                     if line:
                         pending_space = True
@@ -3051,9 +3243,16 @@ class Application:
                         tail = line[break_at:].strip()
                         if tail and font.measure(head) >= max_width * 0.30:
                             lines.append(head)
-                            line = tail + (" " if pending_space else "") + token
-                            if font.measure(line) > max_width:
-                                lines.append(line.rstrip())
+                            candidate_line = tail + (" " if pending_space else "") + token
+                            if font.measure(candidate_line) <= max_width:
+                                line = candidate_line
+                            else:
+                                # ⚠️ `tail + token` 也放不下一行：**不能整行塞进
+                                # lines**——那会把弹窗撑宽（实测 546px > 525px）。
+                                # tail 自己一行，token 从下一行开始。
+                                # 注意 token 已在上面按宽度切过块，所以它本身
+                                # 不会超过一行。
+                                lines.append(tail.rstrip())
                                 line = token
                             pending_space = False
                             break_at = -1
@@ -3150,7 +3349,16 @@ class Application:
             )
             cancel.pack(side=tk.RIGHT, padx=(0, self._gap_compact))
         window.bind("<Return>", lambda _e: finish(True))
-        window.bind("<Escape>", lambda _e: finish(False))
+        # ⚠️ Esc **必须把事件吃掉**（返回 "break"）：`_wire_shortcuts` 用
+        # `root.bind_all("<Escape>")` 挂了全局 Esc，而 bindtags 链条在
+        # 控件自己的绑定之后**还会走到 "all"**。不拦的话，用户按 Esc 关掉
+        # 这扇确认框的同一秒，正在进行的生成会被一起取消——实测复现：
+        # 生成中打开设置窗口按 Esc，`cancel_event` 被置位。
+        def cancel_with_escape(_event=None) -> str:
+            finish(False)
+            return "break"
+
+        window.bind("<Escape>", cancel_with_escape)
         window.protocol("WM_DELETE_WINDOW", lambda: finish(False))
         window.update_idletasks()
         self._place_toplevel(window, 360, fit=True, fixed_width=True)
@@ -3170,6 +3378,22 @@ class Application:
 
     def ask_yes_no(self, title: str, message: str) -> bool:
         return self._show_dialog(title, message, kind="warning", ask=True)
+
+    def _bind_escape_close(self, window: tk.Toplevel) -> None:
+        """把 Esc 绑定成"只关这一扇窗"，并且**吃掉事件**。
+
+        ⚠️ 不返回 ``"break"`` 时，`_wire_shortcuts` 里
+        ``root.bind_all("<Escape>", _on_escape)`` 还会再跑一次：用户按 Esc
+        关掉设置/提示窗口的同一秒，正在进行的生成会被一起取消
+        （状态栏出现"正在取消…已下载的部分会被丢弃"）。
+        这是实测复现过的缺陷，不是理论问题。
+        """
+
+        def close(_event=None) -> str:
+            window.destroy()
+            return "break"
+
+        window.bind("<Escape>", close)
 
     def _reveal_popup(self, window: tk.Toplevel) -> None:
         """把已完成布局的弹窗一次性显示出来。
@@ -3232,6 +3456,12 @@ class Application:
         frame_offset_y = max(0, main_y - self.root.winfo_y())
         screen_w = window.winfo_screenwidth()
         screen_h = window.winfo_screenheight()
+        # 夹到**窗口所在显示器**的可用区域（已扣掉任务栏），不是主屏：
+        # `winfo_screenwidth/height` 报的是主显示器，主窗口在第二块屏时
+        # 弹窗会被拉到主屏；显示器在主屏左边/上边时坐标是负数，
+        # 旧代码的 `max(0, ...)` 会把弹窗强行拉回 0。
+        work = platform_win.monitor_work_area(platform_win.window_id_of(self.root))
+        work_left, work_top, work_right, work_bottom = work or (0, 0, screen_w, screen_h)
         # 横向、纵向都以主窗体中心为准（用户 2026-10-18 定稿：设置/提示
         # 都要居中；旧代码纵向用了 1/3，所以设置窗口总在左下）。
         # 子窗口比主窗体高时也照样以主窗体中心对齐，超出屏幕的部分再由
@@ -3240,11 +3470,11 @@ class Application:
         y = main_y + (main_h - height_px) // 2
         x -= frame_offset_x
         y -= frame_offset_y
-        x = max(0, min(x, screen_w - width_px - frame_offset_x))
-        max_y = screen_h - height_px - frame_offset_y - self.theme.px(48)
-        if max_y < 0:
-            max_y = max(0, screen_h - height_px - frame_offset_y)
-        y = max(0, min(y, max_y))
+        x = max(work_left, min(x, work_right - width_px - frame_offset_x))
+        max_y = work_bottom - height_px - frame_offset_y - self.theme.px(48)
+        if max_y < work_top:
+            max_y = max(work_top, work_bottom - height_px - frame_offset_y)
+        y = max(work_top, min(y, max_y))
         # exact / fixed_width / 普通尺寸都显式写 width x height；fit 的高度
         # 已经由 reqheight 得到。这样窗口只会以最终大小出现一次。
         window.geometry(f"{width_px}x{height_px}+{x}+{y}")
@@ -3326,7 +3556,7 @@ class Application:
             footer, L("知道了", "Got it"), window.destroy, theme=self.theme, kind="neutral"
         )
         close.pack()
-        window.bind("<Escape>", lambda _e: window.destroy())
+        self._bind_escape_close(window)
         window.protocol("WM_DELETE_WINDOW", window.destroy)
         window.update_idletasks()
         self._apply_window_chrome()
@@ -3458,7 +3688,7 @@ class Application:
             # 它的作用就是"打开配置文件所在目录"，靠"配置文件"这个词
             # 已经能定位，不需要把动作也写进按钮名。
             L("配置文件", "Config file"),
-            lambda: platform_win.reveal_in_explorer(str(config_path()), select=True),
+            self.open_config_location,
             theme=self.theme,
             kind="ghost",
             pad_x=SPACE_4,
@@ -3552,7 +3782,7 @@ class Application:
             pady=(line_gap, SPACE_3),
         )
 
-        window.bind("<Escape>", lambda _e: window.destroy())
+        self._bind_escape_close(window)
         window.protocol("WM_DELETE_WINDOW", window.destroy)
         window.update_idletasks()
         # **固定设置窗口尺寸**：以中文内容量为基准（英文提示已经缩短到同样
@@ -3611,13 +3841,25 @@ class Application:
             self._start_voice_fetch()
 
     def _on_settings_proxy(self, value: str) -> None:
+        """代理输入框失焦 / 回车：**立即**保存并重拉语音列表。
+
+        防抖（250ms 保存 / 700ms 重拉）负责"一边打字一边等"；这条路径是
+        用户明确表示"我填完了"。注意 trace 已经把值同步进 `settings` 了，
+        所以不能再靠 `value != settings.proxy` 判断"变没变"——那样恒为 False，
+        失焦/回车就什么都不做（旧实现就是这样）。
+        """
         value = value.strip()
-        changed = value != self.settings.proxy
-        if changed:
-            self.settings.proxy = value
+        self.settings.proxy = value
+        for attribute in ("_proxy_save_id", "_proxy_reload_id"):
+            after_id = getattr(self, attribute)
+            if after_id is not None:
+                try:
+                    self.root.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                setattr(self, attribute, None)
         self._save_settings()
-        if changed:
-            self._reload_voices_for_proxy()
+        self._reload_voices_for_proxy()
 
     def _on_settings_hints(self, value: bool) -> None:
         was_visible = bool(self.help_strip.winfo_manager())
@@ -3646,7 +3888,12 @@ class Application:
             top_pad = int(pady[0]) if isinstance(pady, (tuple, list)) else int(pady)
         except (tk.TclError, TypeError, ValueError):
             return
+        # `update()` 会处理**所有**挂起事件，包括用户此刻点的关闭窗口：
+        # 那会在本函数执行到一半时销毁 root，下一句 `winfo_height()` 就抛
+        # TclError（留一段回调 traceback）。所以更新完先确认窗口还在。
         self.root.update()
+        if self._closing or not self.root.winfo_exists():
+            return
         if self._content_bottom() <= self.root.winfo_height():
             return
         extra = self.help_strip.winfo_reqheight() + top_pad
@@ -3737,7 +3984,7 @@ class Application:
         self.help_strip_close.set_text(L("知道了", "Got it"), repaint=False)
         self.paste_button.set_text(L("读入文件", "Load file"), repaint=False)
         self.clear_button.set_text(L("清空", "Clear"), repaint=False)
-        self.choose_dir_button.set_text(L("选择…", "Pick"), repaint=False)
+        self.choose_dir_button.set_text(L("选择…", "Pick..."), repaint=False)
         self.output_dir_button.set_text(L("输出目录", "Output"), repaint=False)
         self.generate_button.set_text(
             L("生成中…", "Generating...") if self.generating else L("生成语音", "Generate"),
@@ -3786,18 +4033,10 @@ class Application:
 
     def _refresh_tooltips(self) -> None:
         """更新 Tooltip 文案；图标按钮没有可见文字，提示必须跟着语言走。"""
-        texts = [
-            L("主题：跟随系统", "Theme: system"),
-            L("主题：浅色", "Theme: light"),
-            L("主题：深色", "Theme: dark"),
-            L("设置", "Settings"),
-            L("使用提示（Ctrl+H）", "Help (Ctrl+H)"),
-            L("语速范围 -100 到 +200（%）", "Rate range -100 to +200 (%)"),
-            L("音量范围 -100 到 +100（%）", "Volume range -100 to +100 (%)"),
-            L("音调范围 -100 到 +100（Hz）", "Pitch range -100 to +100 (Hz)"),
-        ]
-        for tip, text_value in zip(getattr(self, "tooltips", []), texts):
-            tip.update(text_value, self.theme)
+        for tip in getattr(self, "tooltips", []):
+            key = getattr(tip, "key", "")
+            if key:
+                tip.update(self._tooltip_text(key), self.theme)
 
     # ------------------------------------------------------------------ 状态
 
@@ -3993,9 +4232,12 @@ class Application:
         # 当前正文提取；只有提取不出来时才退回上次的名字。
         base_name = self._suggest_file_name(content)
         if base_name:
+            # 用户 2026-10-18 定稿：默认名带上所选语音，且**语音后缀在参数
+            # 后缀之前**：标题_en-US-AriaNeural_语速+20%.mp3。
             base_name = text_mod.add_filename_suffix(
                 base_name,
-                params_mod.filename_suffix(rate, volume, pitch),
+                params_mod.voice_suffix(voice.short_name)
+                + params_mod.filename_suffix(rate, volume, pitch),
             )
         initial_name = (
             base_name
@@ -4156,20 +4398,37 @@ class Application:
 
         **tkinter 不是线程安全的**：后台线程只往队列里放东西，界面改动全部
         发生在这里（主线程）。
+
+        ⚠️ **一个事件处理失败不能停掉整个队列泵。** 这里原来的写法是
+        ``while True: get_nowait(); _handle_event()``，只要 `_handle_event`
+        抛出一次（比如某个控件已销毁导致 `TclError`，或者一处格式化 bug），
+        后面那句 ``root.after(80, ...)`` 就不会执行——进度、完成、失败、
+        语音列表**再也不会进界面**，用户看到的是"永远停在生成中"。
+        实测（tools 里的临时探针）复现过：投一个坏事件之后，后续正常事件
+        1.5 秒都没被消费，队列里还留着。
+
+        现在逐个事件兜住异常并**保证排下一轮**；异常本身写进诊断输出，
+        不吞掉（排查时还看得到）。
         """
         try:
             while True:
                 kind, payload = self.events.get_nowait()
-                self._handle_event(kind, payload)
+                try:
+                    self._handle_event(kind, payload)
+                except Exception:  # noqa: BLE001 - 一个事件坏掉不该拖垮队列
+                    platform_win.report(
+                        f"[events] handler failed for {kind!r}\n{traceback.format_exc()}"
+                    )
         except queue.Empty:
             pass
-        if not self._closing:
-            # 记住这个 id：窗口销毁时要撤掉它，否则 Tk 会在窗口已经没了之后
-            # 再调回来一次，终端上留下 `while executing "..."` 的噪音。
-            try:
-                self._drain_id = self.root.after(80, self._drain_events)
-            except tk.TclError:
-                self._drain_id = None
+        finally:
+            if not self._closing:
+                # 记住这个 id：窗口销毁时要撤掉它，否则 Tk 会在窗口已经没了之后
+                # 再调回来一次，终端上留下 `while executing "..."` 的噪音。
+                try:
+                    self._drain_id = self.root.after(80, self._drain_events)
+                except tk.TclError:
+                    self._drain_id = None
 
     def _handle_event(self, kind: str, payload) -> None:
         if kind == "voices":
@@ -4274,12 +4533,18 @@ class Application:
             )
             paths.append(result.subtitle_path)
         else:
-            lines.append(
-                L(
-                    "这次没有生成字幕（服务端没有返回词边界）。",
-                    "No subtitles were generated (the server returned no word boundaries).",
-                )
+            note = L(
+                "这次没有生成字幕（服务端没有返回词边界）。",
+                "No subtitles were generated (the server returned no word boundaries).",
             )
+            if getattr(result, "stale_subtitle_removed", False):
+                # 删掉旧字幕是"避免播放器加载上一版字幕"的正确动作，
+                # 但要说出来，不要让它看起来像什么都没发生。
+                note += L(
+                    "同名的旧字幕已移除。",
+                    " The previous same-named subtitle was removed.",
+                )
+            lines.append(note)
         lines.append(L(f"用时 {result.elapsed_seconds:0.1f} 秒", f"Took {result.elapsed_seconds:0.1f} sec"))
         self.set_result_status("\n".join(lines), paths)
 
@@ -4413,7 +4678,8 @@ class Application:
             except tk.TclError:
                 pass
             self._settle_after_id = None
-        for attribute in ("_proxy_save_id", "_proxy_reload_id"):
+        for attribute in ("_proxy_save_id", "_proxy_reload_id", "_counts_after_id",
+                          "_prewarm_after_id"):
             after_id = getattr(self, attribute)
             if after_id is not None:
                 try:

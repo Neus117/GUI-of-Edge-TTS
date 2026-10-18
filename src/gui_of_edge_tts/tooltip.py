@@ -87,6 +87,27 @@ class Tooltip:
         with platform_win.suspend_redraw(window):
             window.deiconify()
             window.update_idletasks()
+            # 贴近屏幕右/下边缘的按钮：提示框会有一半在屏幕外。量完自身尺寸
+            # 后夹回**该显示器**的可用区域（含任务栏）。
+            width = max(1, window.winfo_reqwidth())
+            height = max(1, window.winfo_reqheight())
+            try:
+                hwnd = self.widget.winfo_id()
+            except tk.TclError:
+                hwnd = 0
+            work = platform_win.monitor_work_area(hwnd)
+            if work is None:
+                work = (
+                    0,
+                    0,
+                    self.widget.winfo_screenwidth(),
+                    self.widget.winfo_screenheight(),
+                )
+            left, work_top, right, bottom = work
+            x = min(max(left, x), max(left, right - width - 4))
+            y = min(max(work_top, y), max(work_top, bottom - height - 4))
+            window.wm_geometry(f"+{x}+{y}")
+            window.update_idletasks()
         self._window = window
 
     def _hide(self, _event=None) -> None:

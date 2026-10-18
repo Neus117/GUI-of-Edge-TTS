@@ -98,6 +98,7 @@ def run_smoke(
     # `Application()` 要跑一百多毫秒——等到那时才挪窗口，用户已经看到它闪了
     # 一下（实测被抓到过一次）。`withdraw()` 在创建之后马上调用，屏幕上什么都不会出现。
     root.withdraw()
+    app = None
     try:
         app = Application(root, settings)
         # 再把窗口**映射到屏幕外**：几何量、事件、状态栏都要求窗口真的被映射
@@ -195,7 +196,9 @@ def run_smoke(
             result.fail(f"没有生成 {audio_path.name}")
         else:
             size = audio_path.stat().st_size
-            header = audio_path.read_bytes()[:3]
+            # 只读 3 个字节：`read_bytes()[:3]` 会把整段音频读进内存再切片。
+            with audio_path.open("rb") as handle:
+                header = handle.read(3)
             result.note(f"音频 {audio_path.name} = {size:,} 字节，头部 {header!r}")
             if size < 1000:
                 result.fail("音频文件太小，多半不是有效的 mp3")
@@ -259,6 +262,23 @@ def run_smoke(
             names = "、".join(b.cget_text() for b in hidden)
             result.fail(f"生成成功后产物按钮没出现：{names}")
     finally:
+        # 超时/提前返回时后台线程可能还在跑：先取消，再给它两秒把
+        # aiohttp session 与临时文件收干净，然后才销毁窗口。
+        # 不等的话，进程退出会在 %TEMP% 留 `.part`，终端里还会冒
+        # "Unclosed client session"。
+        try:
+            if app is not None and app.generating:
+                app.cancel_generation()
+                deadline = time.monotonic() + 2.0
+                while app.generating and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.02)
+            if app is not None:
+                for thread in (app._voice_thread, app._synth_thread):  # noqa: SLF001
+                    if thread is not None and thread.is_alive():
+                        thread.join(1.0)
+        except Exception:  # noqa: BLE001 - 收尾失败不该盖住真正的结果
+            pass
         try:
             root.destroy()
         except Exception:  # noqa: BLE001

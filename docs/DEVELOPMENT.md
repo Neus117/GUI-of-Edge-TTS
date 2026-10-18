@@ -614,7 +614,8 @@ DLL 只补包根目录，Tcl/Tk 数据交给 PyInstaller 6 的 hook（`_tcl_data
   - 设置窗口关闭后按新语言重开（代理值已实时保存，不丢）；
   - 使用提示窗口按新语言重建。
 - `params` / `text` / `voices` / `engine` 的用户可见错误与单位也使用 L；
-  文件名后缀在英文下变成 `_rate+20%` 这类形式。
+  文件名后缀在英文下变成 `_rate+20%` 这类形式。语音短名不翻译，始终排在
+  参数后缀之前（`_en-US-AriaNeural_rate+20%`）。
 - 语言切换时 `retranslate()` 外面套 `platform_win.suspend_redraw(root)`：
   用 Windows `LockWindowUpdate` 把整段更新冻结成一帧，解锁后整棵树
   `RedrawWindow` 一次，避免按钮改宽时旧像素从缝隙里闪出。
@@ -625,3 +626,71 @@ DLL 只补包根目录，Tcl/Tk 数据交给 PyInstaller 6 的 hook（`_tcl_data
 
 **没有翻译的**：语音目录里上游返回的语音名/中文别名、用户输入的文本/路径。
 这些是数据，不是界面文案。
+
+---
+
+## 十四、2026-10-18 后续修正（进度条 / 关闭噪音 / 默认命名）
+
+v2.0.0 发布之后的复查与修正。判据与前面各节相同：走用户真实走的路径、
+回读实际值、有对照。
+
+### 14.1 进度条直段比圆头细 1 px（用户截图报回来）
+
+**症状**（用户原话）："进度条两端的圆点相对于进度条的矩形来讲太粗了，
+或者说是矩形细了。"
+
+**根因**：填充的直段是 `create_rectangle`。Tk 在没有 outline 时，填充区域是
+`[x0, x1) × [y0, y1)`——**右/下边界那一条不填**。代码写的是
+`y1 = top + bar_h - 1`，于是直段只有 `bar_h-1 = 13` 行，而两端的圆头位图
+是 `bar_h = 14` 行。
+
+**判据**：用户截图逐列量：圆头 y=27..40（14 行），直段 y=27..39（13 行）。
+把 `y1` 改成 `top + bar_h` 后画布回读为 `y0=10, y1=24`，填充 10..23 共 14 行。
+
+### 14.2 关闭时的 `Task was destroyed` / `Unclosed client session`
+
+**症状**（用户终端里贴回来的）：
+
+```
+Task was destroyed but it is pending!
+task: <Task pending ... <async_generator_athrow ...>>
+Unclosed client session
+RuntimeError: Event loop is closed   (ClientResponse.__del__)
+```
+
+**只在取消时出现**，正常完成没有。根因是 edge-tts 的 `stream()` 里面还套着
+一层 `async for ... in self.__stream(): yield ...`，而 `async with ClientSession`
+在内层。取消时我们只 `aclose()` 了**外层**；内层生成器要等垃圾回收才被
+asyncio 终结器排一个 `athrow` 任务去关，而这时 `loop.close()` 已经执行，
+任务永远跑不到，session 也没有机会关闭。
+
+**修法**（`engine.synthesize` 的 `finally`）：在循环还活着的时候
+`loop.run_until_complete(loop.shutdown_asyncgens())`，再把排队的终结任务
+等完（每轮 3 秒上限，避免"关闭"变成无限等待），最后才 `loop.close()`。
+
+**判据**：四个场景各跑一次真实 Application——正常完成 / 中途取消 /
+生成中关窗 / 语音列表加载中关窗；修前只有"取消"复现三句噪音，修后四个
+场景的 stderr 都是 0 字节。
+
+### 14.3 默认文件名带上所选语音（用户定稿）
+
+规则：`标题_<语音短名>_<参数后缀>.mp3`，语音后缀在参数后缀**之前**。
+例：`End like ..._en-US-EmmaMultilingualNeural_语速+30%.mp3`。
+语音短名不翻译；参数后缀仍随界面语言（`_语速+20%` / `_rate+20%`）。
+实现：`params.voice_suffix(short_name)` + `start_generation` 里拼接。
+测试：`test_voice_suffix_comes_before_parameter_suffix`。
+
+### 14.4 同一轮的其它修正
+
+- 进度条填充改为"缓存圆头 + 直角矩形"，单次重绘 30.55 ms → 0.22 ms；
+- 编辑区字数统计 120 ms 防抖 + 单遍计数（30 万字 41 → 23 ms，按键路径 41 → 0.02 ms）；
+- `_drain_events` 逐事件兜异常 + `finally` 排下一轮（坏事件不再停掉队列泵）；
+- Esc 在弹窗里返回 `"break"`（不再连带取消生成）；
+- 音频/字幕都先写临时文件再依次改名；无词边界时删同名旧 `.srt` 并在状态栏说明；
+- 取消等待上限 `receive_timeout=20`；提交前再查一次取消；
+- 设置文件接受 UTF-8 BOM / UTF-16，读不出才留档 `.bad`；
+- `ETTS_THEME`/`ETTS_LANG` 不落盘；环境变量覆盖只影响运行期；
+- 冻结态 `--help`：`_ensure_console()` 前置到 `parse_args` 之前；
+- 多显示器：弹窗按显示器 work area 夹取；图标按窗口 DPI 取尺寸并缓存 HICON。
+
+单测 177 条；12 项门禁全过（含联网 e2e）。

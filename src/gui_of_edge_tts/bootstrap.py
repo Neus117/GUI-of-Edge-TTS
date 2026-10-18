@@ -22,6 +22,10 @@ from .theme import Theme
 EXIT_OK = 0
 EXIT_FAILED = 1
 
+#: 输出方向只准备一次。`attach_parent_console()` 每次都会打开新的 CONOUT$
+#: 句柄并重绑 `sys.stdout`，重复调用既浪费又会让前面的流悬空。
+_CONSOLE_READY: Optional[bool] = None
+
 
 def _ensure_console() -> bool:
     """保证 ``print`` 有地方可写，且不会炸。
@@ -36,10 +40,17 @@ def _ensure_console() -> bool:
     ⚠️ 而且冻结态里 ``sys.stdout`` 恒为 ``None``（windowed 启动器不给子进程
     标准句柄），所以**必须先 `attach_parent_console()`**，它会去要父进程的
     管道/重定向句柄——不能只用 `has_output_stream()` 判断。
+
+    重复调用返回第一次的结果，不再重新接管控制台。
     """
+    global _CONSOLE_READY
+    if _CONSOLE_READY is not None:
+        return _CONSOLE_READY
     if platform_win.attach_parent_console():
-        return True
-    return platform_win.has_output_stream()
+        _CONSOLE_READY = True
+    else:
+        _CONSOLE_READY = platform_win.has_output_stream()
+    return _CONSOLE_READY
 
 
 def _report_without_console(title: str, body: str) -> None:
@@ -154,13 +165,22 @@ def run_selftest() -> int:
 
     print(L(f"版本：{version_mod.version_string()}", f"Version: {version_mod.version_string()}"))
     results.append(_check(L("版本号非空", "Version is non-empty"), bool(version_mod.APP_VERSION)))
+    # ⚠️ 这一项原来把 `True` 当条件传进去——**它永远不可能失败**，
+    # 自检里"15 项通过"就多了一项假的。冻结成 exe 之后"这个 exe 来自哪次
+    # 提交"是必须能核对的信息，所以：源码态允许 unknown（开发机上本来就没有
+    # 提交信息），**冻结态出现 unknown 就是失败**。
+    commit = version_mod.version_string().split("+")[-1]
+    commit_known = commit != "unknown"
     results.append(
         _check(
             L("构建提交已知", "Build commit is known")
-            if version_mod.version_string().split("+")[-1] != "unknown"
-            else L("构建提交未知（开发态可能是 unknown）", "Build commit unknown (development may be unknown)"),
-            True,
-            version_mod.version_string().split("+")[-1],
+            if commit_known
+            else L(
+                "构建提交未知（源码运行允许，冻结包不允许）",
+                "Build commit unknown (allowed from source, not in a frozen build)",
+            ),
+            commit_known or not getattr(sys, "frozen", False),
+            commit,
         )
     )
 
@@ -316,6 +336,12 @@ def run_selftest() -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     settings = Settings.load().with_environment_overrides()
     apply_language(settings.language)
+
+    # **输出方向要在解析参数之前准备好。** `argparse` 的 `--help` 与参数错误
+    # 是在 `parse_args` 内部打印的；冻结成 windowed exe 时那会儿 `sys.stdout`
+    # 还是 None，于是 `exe --help` 什么都不打印（还退出 0）。
+    has_output = _ensure_console()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -326,7 +352,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         # 这三个命令都要往某个地方写。`_ensure_console()` 的判据是
         # **有没有可写的地方**（控制台、管道、重定向文件都算），
         # 而不是"有没有控制台"——后者会让 `> out.log` 这种调用什么都拿不到。
-        has_output = _ensure_console()
         if args.version:
             if has_output:
                 print(version_mod.version_string())

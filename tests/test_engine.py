@@ -89,8 +89,23 @@ class HumanizeTests(unittest.TestCase):
         self.assertIn("403", message)
 
     def test_oserror_is_about_writing_files(self) -> None:
-        message = engine._humanize(OSError("disk full"))  # pylint: disable=protected-access
+        # 带文件名的 OSError 才是"写文件失败"（open/write/os.replace 都会带）
+        error = OSError(28, "No space left on device", r"D:\out\speech.mp3")
+        message = engine._humanize(error)  # pylint: disable=protected-access
         self.assertIn("文件", message)
+
+    def test_network_oserror_is_not_reported_as_a_file_error(self) -> None:
+        """`ConnectionResetError` 也是 OSError，但它不是写文件失败。
+
+        回归判据：报错里**不能**出现"文件"——否则用户会去查磁盘和权限，
+        而他真正该查的是网络/代理。
+        """
+        for error in (
+            ConnectionResetError(10054, "Connection reset by peer"),
+            OSError(10051, "Network is unreachable"),
+        ):
+            message = engine._humanize(error)  # pylint: disable=protected-access
+            self.assertNotIn("文件", message)
 
     def test_unknown_error_keeps_the_type_name(self) -> None:
         class WeirdError(Exception):
@@ -211,6 +226,80 @@ class SynthesisFlowTests(unittest.TestCase):
             self.assertTrue(target.exists())
             self.assertIsNone(result.subtitle_path)
             self.assertFalse(Path(engine.srt_path_for(str(target))).exists())
+            self.assertFalse(result.stale_subtitle_removed)
+
+    def test_no_word_boundaries_removes_stale_srt(self) -> None:
+        """没有词边界时，同名的旧字幕必须清掉。
+
+        否则播放器会自动加载上一次的字幕，配到这次的新音频上——比没有字幕更糟。
+        """
+        self._install([{"type": "audio", "data": b"z" * 4800}])
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "out.mp3"
+            stale = Path(engine.srt_path_for(str(target)))
+            stale.write_text("1\n00:00:00,000 --> 00:00:01,000\nOLD\n", encoding="utf-8")
+            result = engine.synthesize("hi", "en-US-AriaNeural", str(target))
+            self.assertTrue(target.exists())
+            self.assertFalse(stale.exists())
+            self.assertTrue(result.stale_subtitle_removed)
+
+    def test_success_leaves_no_temp_files(self) -> None:
+        def boundary(index):
+            return {
+                "type": "WordBoundary",
+                "offset": index * 5_000_000,
+                "duration": 4_000_000,
+                "text": f"w{index}",
+            }
+
+        self._install([{"type": "audio", "data": b"x" * 6000}, boundary(0)])
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "out.mp3"
+            result = engine.synthesize("hi", "en-US-AriaNeural", str(target))
+            self.assertTrue(result.subtitle_path)
+            leftovers = sorted(p.name for p in Path(folder).iterdir() if p.name.endswith(".part"))
+            self.assertEqual(leftovers, [])
+
+    def test_cancel_after_last_chunk_keeps_nothing(self) -> None:
+        """最后一个 chunk 之后、落盘之前点取消：不能把文件提交上去。"""
+        cancel = threading.Event()
+
+        def progress(_value):
+            cancel.set()
+
+        self._install([{"type": "audio", "data": b"a" * 6000}])
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "out.mp3"
+            with self.assertRaises(engine.SynthesisCancelled):
+                engine.synthesize(
+                    "hi", "en-US-AriaNeural", str(target), cancel=cancel,
+                    on_progress=progress,
+                )
+            self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_subtitle_write_failure_keeps_audio_and_says_where_it_is(self) -> None:
+        """音频已提交、字幕提交失败：报错里必须带音频路径，且不留 .part。"""
+
+        def boundary(index):
+            return {
+                "type": "WordBoundary",
+                "offset": index * 5_000_000,
+                "duration": 4_000_000,
+                "text": f"w{index}",
+            }
+
+        self._install([{"type": "audio", "data": b"x" * 6000}, boundary(0)])
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "out.mp3"
+            # 让字幕路径变成一个目录：临时文件能写，最终改名一定失败。
+            Path(engine.srt_path_for(str(target))).mkdir()
+            with self.assertRaises(engine.SynthesisError) as caught:
+                engine.synthesize("hi", "en-US-AriaNeural", str(target))
+            self.assertTrue(target.exists())
+            self.assertIn("音频已保存", str(caught.exception))
+            self.assertIn(str(target), str(caught.exception))
+            leftovers = sorted(p.name for p in Path(folder).iterdir() if p.name.endswith(".part"))
+            self.assertEqual(leftovers, [])
 
     def test_upstream_exception_becomes_synthesis_error_and_cleans_up(self) -> None:
         def explode(_script):

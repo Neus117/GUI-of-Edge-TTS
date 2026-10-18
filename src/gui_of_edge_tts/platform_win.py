@@ -13,7 +13,7 @@ import sys
 from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Dict, Iterator, Optional, Tuple
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -45,7 +45,11 @@ def suspend_redraw(widget) -> Iterator[None]:
             hwnd = 0
     if hwnd:
         try:
-            locked = bool(ctypes.windll.user32.LockWindowUpdate(hwnd))
+            user32 = ctypes.windll.user32
+            # HWND 必须声明成指针宽：ctypes 默认按 c_int 传，64 位下会被截断。
+            user32.LockWindowUpdate.argtypes = [wintypes.HWND]
+            user32.LockWindowUpdate.restype = wintypes.BOOL
+            locked = bool(user32.LockWindowUpdate(wintypes.HWND(hwnd)))
         except Exception:  # noqa: BLE001
             locked = False
     try:
@@ -54,11 +58,18 @@ def suspend_redraw(widget) -> Iterator[None]:
         if hwnd:
             try:
                 user32 = ctypes.windll.user32
+                user32.RedrawWindow.argtypes = [
+                    wintypes.HWND,
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                    wintypes.UINT,
+                ]
+                user32.RedrawWindow.restype = wintypes.BOOL
                 if locked:
                     user32.LockWindowUpdate(None)
                 # 解锁后强制擦掉旧像素，再把整棵控件树画一遍。
                 user32.RedrawWindow(
-                    hwnd,
+                    wintypes.HWND(hwnd),
                     None,
                     None,
                     0x0001  # RDW_INVALIDATE
@@ -137,26 +148,58 @@ def system_accent_color() -> Optional[str]:
 def enable_dpi_awareness() -> str:
     """让进程按显示器 DPI 感知。**必须在创建 Tk 根窗口之前调用。**
 
-    返回实际生效的模式名，便于自检里断言"确实设上了"。
+    返回**实际生效**的模式名（查回来的，不是"我调用过"）。
+    已经被清单/宿主设过时，`SetProcessDpiAwarenessContext` 会返回失败
+    （ERROR_ACCESS_DENIED）；旧代码此时仍然报 `per-monitor-v2`，于是诊断
+    信息会掩盖"实际不是这个模式"。
     """
     if not IS_WINDOWS:
         return "skipped"
     try:
-        # Windows 10 1703+：Per-Monitor V2
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-        return "per-monitor-v2"
+        user32 = ctypes.windll.user32
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.SetProcessDpiAwarenessContext.restype = wintypes.BOOL
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return "per-monitor-v2"
     except (AttributeError, OSError):
         pass
+    current = _process_awareness()
+    if current not in ("unaware", "unknown", "skipped"):
+        return current
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        return "per-monitor"
+        return _process_awareness()
     except (AttributeError, OSError):
         pass
     try:
         ctypes.windll.user32.SetProcessDPIAware()
-        return "system"
+        return _process_awareness()
     except (AttributeError, OSError):
         return "none"
+
+
+def _process_awareness() -> str:
+    """回读当前进程的 DPI 感知模式。"""
+    if not IS_WINDOWS:
+        return "skipped"
+    try:
+        value = ctypes.c_int(0)
+        ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(value))
+        return {0: "unaware", 1: "system", 2: "per-monitor"}.get(
+            int(value.value), f"dpi-{int(value.value)}"
+        )
+    except (AttributeError, OSError):
+        pass
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.GetAwarenessFromDpiAwarenessContext.restype = wintypes.DWORD
+        context = user32.GetThreadDpiAwarenessContext()
+        awareness = int(user32.GetAwarenessFromDpiAwarenessContext(context))
+        return {0: "unaware", 1: "system", 2: "per-monitor"}.get(awareness, "unknown")
+    except (AttributeError, OSError, ValueError):
+        return "unknown"
 
 
 def system_dpi() -> int:
@@ -264,9 +307,16 @@ def focus_rect_suppressed(hwnd: int) -> bool:
         return False
     try:
         user32 = ctypes.windll.user32
+        user32.SendMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.SendMessageW.restype = wintypes.LPARAM
         state = user32.SendMessageW(wintypes.HWND(hwnd), WM_QUERYUISTATE, 0, 0)
-        return bool(state & UISF_HIDEFOCUS)
-    except (AttributeError, OSError):
+        return bool(int(state) & UISF_HIDEFOCUS)
+    except (AttributeError, OSError, ValueError):
         return False
 
 
@@ -326,11 +376,66 @@ def window_id_of(widget) -> int:
     if not handle or not IS_WINDOWS:
         return handle
     try:
+        user32 = ctypes.windll.user32
+        # ⚠️ `restype` 不声明时 ctypes 按 c_int 返回——64 位下 HWND 会被截断，
+        # 后续 DWM/WM_SETICON 全部用错句柄（本模块自己的 5.5 节踩过）。
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
         GA_ROOT = 2
-        root_handle = int(ctypes.windll.user32.GetAncestor(ctypes.c_void_p(handle), GA_ROOT))
-        return root_handle or handle
+        root_handle = user32.GetAncestor(wintypes.HWND(handle), GA_ROOT)
+        # `restype` 是 c_void_p 时 ctypes **返回 int 或 None**（不是 c_void_p 对象），
+        # 所以不能再取 `.value`——那样会抛 AttributeError 被下面的 except 吞掉，
+        # 悄悄退回内层句柄（DWM 又会拿到 E_HANDLE）。
+        return int(root_handle or 0) or handle
     except (AttributeError, OSError, ValueError):
         return handle
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+MONITOR_DEFAULTTONEAREST = 2
+
+
+def monitor_work_area(window_id: int) -> Optional[Tuple[int, int, int, int]]:
+    """窗口所在显示器的可用区域 ``(left, top, right, bottom)``；拿不到返回 None。
+
+    为什么不用 Tk 的 ``winfo_screenwidth/height``：那是**主显示器**的尺寸。
+    主窗口在第二块屏上时，弹窗会被夹到主屏去；显示器在主屏左边/上边时
+    坐标是负数，而旧代码里的 ``max(0, ...)`` 会把弹窗强行拉回 0。
+
+    ⚠️ 只看 monitor work area（扣掉任务栏），不是整块屏幕。
+    """
+    if not IS_WINDOWS or not window_id:
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.MonitorFromWindow.restype = wintypes.HMONITOR
+        user32.GetMonitorInfoW.argtypes = [
+            wintypes.HMONITOR,
+            ctypes.POINTER(_MONITORINFO),
+        ]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        monitor = user32.MonitorFromWindow(
+            wintypes.HWND(window_id), MONITOR_DEFAULTTONEAREST
+        )
+        if not monitor:
+            return None
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        rect = info.rcWork
+        return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 def set_window_icon(
@@ -338,7 +443,7 @@ def set_window_icon(
     small_icon_path: str,
     big_icon_path: Optional[str] = None,
 ) -> tuple:
-    """用 Win32 ``WM_SETICON`` 给窗口设置**按当前 DPI 取尺寸**的图标。
+    """用 Win32 ``WM_SETICON`` 给窗口设置**按窗口 DPI 取尺寸**的图标。
 
     ``small_icon_path`` 是标题栏图标（按主题给 light/dark），
     ``big_icon_path`` 是任务栏/Alt-Tab 图标（默认主图标）。
@@ -348,10 +453,67 @@ def set_window_icon(
     16/32/256；用单帧拉伸就会糊。这里让 ``LoadImageW`` 按系统真实尺寸
     取帧，再分别设置 ICON_SMALL / ICON_BIG。
 
-    返回需要保活的 HICON 元组（LoadImage 的句柄不能被 Python 回收）。
+    ⚠️ 尺寸按**窗口所在显示器**的 DPI 取（`GetDpiForWindow`），不是
+    `GetSystemMetrics`（那个按系统 DPI）。混合 DPI 下两者不同。
+
+    ⚠️ HICON 按"路径 + 尺寸"缓存：旧实现每个弹窗、每次换主题都重新
+    ``LoadImageW`` 两个句柄，而且从不``DestroyIcon``——长会话里句柄一直涨。
+    ``WM_SETICON`` 不接管所有权，同一个 HICON 可以给多个窗口共用，
+    所以缓存是安全的；每个组合只加载一次，句柄随进程结束回收。
+
+    返回句柄元组（调用方持有引用即可，Tk 窗口不拥有它们）。
     """
     if not IS_WINDOWS or not window_id:
         return ()
+    big_path = big_icon_path or small_icon_path
+    small_size = _icon_metric(SM_CXSMICON, window_id) or 16
+    big_size = _icon_metric(SM_CXICON, window_id) or 32
+    key = (small_icon_path, big_path, small_size, big_size)
+    handles = _ICON_CACHE.get(key)
+    if handles is None:
+        handles = _load_icon_pair(small_icon_path, big_path, small_size, big_size)
+        if len(handles) == 2:
+            _ICON_CACHE[key] = handles
+    if handles:
+        _apply_window_icons(window_id, handles)
+    return handles
+
+
+#: `SM_CXSMICON` / `SM_CXICON`
+SM_CXSMICON = 49
+SM_CXICON = 11
+
+#: (小图标路径, 大图标路径, 小尺寸, 大尺寸) → (HICON, HICON)
+_ICON_CACHE: Dict[Tuple[str, str, int, int], Tuple[int, ...]] = {}
+
+
+def _icon_metric(index: int, window_id: int) -> int:
+    """按**窗口所在显示器**的 DPI 取系统图标边长。"""
+    if not IS_WINDOWS:
+        return 0
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+        user32.GetDpiForWindow.restype = wintypes.UINT
+        dpi = int(user32.GetDpiForWindow(wintypes.HWND(window_id)))
+        if dpi > 0:
+            user32.GetSystemMetricsForDpi.argtypes = [ctypes.c_int, wintypes.UINT]
+            user32.GetSystemMetricsForDpi.restype = ctypes.c_int
+            size = int(user32.GetSystemMetricsForDpi(index, dpi))
+            if size > 0:
+                return size
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        return int(ctypes.windll.user32.GetSystemMetrics(index))
+    except (AttributeError, OSError):
+        return 0
+
+
+def _load_icon_pair(
+    small_path: str, big_path: str, small_size: int, big_size: int
+) -> Tuple[int, ...]:
+    """按目标尺寸从 ICO 里取帧。任何失败都返回已取到的句柄（可能为空）。"""
     try:
         user32 = ctypes.windll.user32
         user32.LoadImageW.argtypes = [
@@ -363,6 +525,22 @@ def set_window_icon(
             wintypes.UINT,
         ]
         user32.LoadImageW.restype = wintypes.HICON
+        LR_LOADFROMFILE = 0x10
+        IMAGE_ICON = 1
+        small = user32.LoadImageW(
+            None, small_path, IMAGE_ICON, small_size, small_size, LR_LOADFROMFILE
+        )
+        big = user32.LoadImageW(
+            None, big_path, IMAGE_ICON, big_size, big_size, LR_LOADFROMFILE
+        )
+        return tuple(int(handle or 0) for handle in (small, big) if handle)
+    except (AttributeError, OSError, ValueError):
+        return ()
+
+
+def _apply_window_icons(window_id: int, handles: Tuple[int, ...]) -> None:
+    try:
+        user32 = ctypes.windll.user32
         user32.SendMessageW.argtypes = [
             wintypes.HWND,
             wintypes.UINT,
@@ -370,34 +548,13 @@ def set_window_icon(
             wintypes.LPARAM,
         ]
         user32.SendMessageW.restype = wintypes.LPARAM
-        small_size = int(user32.GetSystemMetrics(49))  # SM_CXSMICON
-        big_size = int(user32.GetSystemMetrics(11))    # SM_CXICON
-        if small_size <= 0:
-            small_size = 16
-        if big_size <= 0:
-            big_size = 32
-        LR_LOADFROMFILE = 0x10
-        IMAGE_ICON = 1
         WM_SETICON = 0x0080
-        big_path = big_icon_path or small_icon_path
-        small = user32.LoadImageW(
-            None,
-            small_icon_path,
-            IMAGE_ICON,
-            small_size,
-            small_size,
-            LR_LOADFROMFILE,
-        )
-        big = user32.LoadImageW(
-            None, big_path, IMAGE_ICON, big_size, big_size, LR_LOADFROMFILE
-        )
-        if small:
-            user32.SendMessageW(window_id, WM_SETICON, 0, small)
-        if big:
-            user32.SendMessageW(window_id, WM_SETICON, 1, big)
-        return tuple(handle for handle in (small, big) if handle)
+        if len(handles) >= 1:
+            user32.SendMessageW(wintypes.HWND(window_id), WM_SETICON, 0, handles[0])
+        if len(handles) >= 2:
+            user32.SendMessageW(wintypes.HWND(window_id), WM_SETICON, 1, handles[1])
     except (AttributeError, OSError, ValueError):
-        return ()
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -434,8 +591,13 @@ def _stream_from_std_handle(which: int):
     """
     import msvcrt  # pylint: disable=import-outside-toplevel
 
-    handle = ctypes.windll.kernel32.GetStdHandle(which)
-    if not handle or handle == ctypes.c_void_p(-1).value:
+    kernel32 = ctypes.windll.kernel32
+    # `GetStdHandle` 的返回值是 HANDLE（指针宽）；不声明 restype 时默认 c_int，
+    # 64 位下高 32 位会被截掉——而且 INVALID_HANDLE_VALUE 的比较高下永远不成立。
+    kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel32.GetStdHandle.restype = wintypes.HANDLE
+    handle = kernel32.GetStdHandle(which)
+    if not handle or handle == wintypes.HANDLE(-1).value:
         return None
     kind = ctypes.windll.kernel32.GetFileType(wintypes.HANDLE(handle))
     if kind not in (FILE_TYPE_PIPE, FILE_TYPE_DISK):
@@ -596,7 +758,9 @@ def reveal_in_explorer(path: str, select: bool = False) -> bool:
         return False
     try:
         if select and target.exists():
-            subprocess.run(["explorer", "/select,", str(target)], check=False)
+            # **不要用 `subprocess.run`**：它会等 explorer 退出。用户机器上
+            # Explorer 没在跑/启动慢时，这一句会把界面线程一起卡住。
+            subprocess.Popen(["explorer", "/select,", str(target)])
         else:
             folder = str(target if target.is_dir() else target.parent)
             os.startfile(folder)  # type: ignore[attr-defined]  # noqa: S606

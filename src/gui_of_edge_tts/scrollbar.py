@@ -258,6 +258,11 @@ class FlatProgress(tk.Canvas):
         self._text = ""
         self._image = None
         self._fill_image = None
+        # 轨道/圆头的位图缓存：(键, PhotoImage)。键包含尺寸与配色，
+        # 换主题或改窗口宽度时自然失效，不必手工清。
+        self._track_key = None
+        self._cap_key = None
+        self._fallback_key = None
         self.bind("<Configure>", lambda _e: self._paint())
 
     # ---- 接口与 ttk.Progressbar 保持兼容（configure(value=…) 的用法不变）----
@@ -285,12 +290,47 @@ class FlatProgress(tk.Canvas):
         return super().cget(key)
 
     def set_value(self, value: float, text: str = "") -> None:
-        """设置进度和它右边那行字（百分比）。"""
+        """设置进度和它右边那行字（百分比）。
+
+        进度值与文字都没变时**不重绘**：生成时每来一个词边界都会调到这里，
+        而音频字节数在两次音频分片之间是不变的——那不改变任何像素。
+        """
+        if value == self._value and text == self._text:
+            return
         self._value = value
         self._text = text
         self._paint()
 
     # ---- 绘制 --------------------------------------------------------------
+
+    def _image_for(
+        self,
+        prefix: str,
+        key: tuple,
+        width: int,
+        height: int,
+        radius: float,
+        fill: str,
+        background: str,
+    ):
+        """按 ``key`` 缓存一张圆角位图（PNG 解码后的 PhotoImage）。
+
+        缓存放在控件上而不是模块里：解码结果绑定 ``master``，跟着控件走；
+        键里带尺寸与颜色，换主题/改宽度时旧图自然不再命中。
+        """
+        if getattr(self, prefix + "_key", None) == key:
+            return getattr(self, prefix + "_image", None)
+        try:
+            png = raster.cached_rounded_rect(
+                width, height, radius, fill,
+                background=background, supersample=2,
+            )
+            image = tk.PhotoImage(master=self, data=png)
+        except Exception:  # noqa: BLE001 - 位图失败就退回多边形/旧路径
+            image = None
+        setattr(self, prefix + "_key", key)
+        setattr(self, prefix + "_image", image)
+        return image
 
     def _paint(self) -> None:
         palette = self.theme.palette
@@ -310,28 +350,23 @@ class FlatProgress(tk.Canvas):
         if self._maximum:
             ratio = max(0.0, min(1.0, float(self._value) / float(self._maximum)))
 
-        # 轨道：整条都用圆角矩形（胶囊）
-        track = raster.cached_rounded_rect(
-            bar_w, bar_h, radius, palette.track,
-            background=palette.background, supersample=2,
+        # 轨道：整条都用圆角矩形（胶囊）。只在宽度/配色变化时重新栅格化。
+        track_key = ("track", bar_w, bar_h, radius, palette.track, palette.background)
+        track = self._image_for(
+            "_track", track_key, bar_w, bar_h, radius,
+            palette.track, palette.background,
         )
         if track is not None:
-            self._image = tk.PhotoImage(master=self, data=track)
-            self.create_image(0, top, image=self._image, anchor="nw")
+            self._image = track
+            self.create_image(0, top, image=track, anchor="nw")
 
-        # 填充：**按实际进度宽度**画一颗胶囊（宽度下限 = 一个圆的直径，
+        # 填充：**按实际进度宽度**画（宽度下限 = 一个圆的直径，
         # 这样 0% 刚起步时也是完整的一颗，不会变成一根针）。
         # 不画满再遮挡——遮挡会在切换主题/重绘时露馅。
         filled = max(bar_h, int(bar_w * ratio)) if ratio > 0 else 0
         filled = min(filled, bar_w)
         if filled > 0:
-            fill = raster.cached_rounded_rect(
-                filled, bar_h, radius, palette.accent,
-                background=palette.track, supersample=2,
-            )
-            if fill is not None:
-                self._fill_image = tk.PhotoImage(master=self, data=fill)
-                self.create_image(0, top, image=self._fill_image, anchor="nw")
+            self._paint_fill(filled, bar_h, radius, top, palette)
 
         if self._text:
             self.create_text(
@@ -340,3 +375,64 @@ class FlatProgress(tk.Canvas):
                 fill=palette.text,
                 font=self.theme.font(FONT_PROGRESS_PT, bold=True),
             )
+
+    def _paint_fill(self, filled: int, bar_h: int, radius: int, top: int, palette) -> None:
+        """填充部分：**两个缓存的圆头 + 一段直角矩形**。
+
+        ## 为什么不整颗胶囊一次栅格化
+
+        生成时每收到一个音频分片，填充宽度就变一次。整颗胶囊按当前宽度
+        栅格化，等于每变一次都重算一整张位图——实测 636px 画布上
+        **单次 30~60 ms**（P90 54.5 ms），一次生成里要重算几十次。
+
+        拆成"圆头 + 矩形"之后：
+
+        * 圆头只取决于条高与配色，**一次生成里只栅格化一次**（缓存）；
+        * 宽度变化只是 ``create_rectangle`` 的一次调用（<0.1 ms）；
+        * 矩形上下两条边是水平直线、与像素网格对齐，不需要抗锯齿；
+          需要抗锯齿的只有两端圆弧，而它们来自缓存的位图。
+
+        画法与旧路径几何一致：左颗圆的左半圆 = 左端，右颗圆的右半圆 =
+        右端，矩形补中间直段。**先贴两颗圆、再贴矩形**——否则朝内的
+        半个圆会把轨道色盖回填充上（那会在两端各留一个凹口）。
+        """
+        accent = palette.accent
+        track = palette.track
+        if filled <= 2 * bar_h:
+            # 刚起步（0%~约 5%）时两段直边还不存在：两颗圆头会互相重叠，
+            # 先贴后贴的顺序会在顶端留下一个轨道色的凹口。这一段按旧路径
+            # 整颗栅格化——宽度最多 2 个条高，栅格化很便宜，而且只在
+            # 生成的**开头**出现一次。
+            fallback_key = ("fill", filled, bar_h, radius, accent, track)
+            fallback = self._image_for(
+                "_fallback", fallback_key, filled, bar_h, radius, accent, track
+            )
+            if fallback is not None:
+                self._fill_image = fallback
+                self.create_image(0, top, image=fallback, anchor="nw")
+            return
+        cap_key = ("cap", bar_h, radius, accent, track)
+        cap = self._image_for("_cap", cap_key, bar_h, bar_h, radius, accent, track)
+        if cap is None:
+            # 兜底：退回"按宽度整颗栅格化"的老路径，宁可慢也要画对。
+            fallback_key = ("fill", filled, bar_h, radius, accent, track)
+            fallback = self._image_for(
+                "_fallback", fallback_key, filled, bar_h, radius, accent, track
+            )
+            if fallback is not None:
+                self._fill_image = fallback
+                self.create_image(0, top, image=fallback, anchor="nw")
+            return
+
+        self.create_image(0, top, image=cap, anchor="nw")
+        self.create_image(filled - bar_h, top, image=cap, anchor="nw")
+        # ⚠️ 右下边界写 `top + bar_h` 而不是 `top + bar_h - 1`：
+        # Tk 的 `create_rectangle` 在没有 outline 时**填充区域不含右/下边界**，
+        # 写 `- 1` 会让直段只有 bar_h-1 像素高，比两端的圆头细 1 像素
+        # （用户截图报回来："两端圆点比矩形粗"）。实测回读：圆头 14 行、
+        # 直段 13 行；改成 `top + bar_h` 后两者都是 14 行。
+        self.create_rectangle(
+            radius, top, filled - radius, top + bar_h,
+            fill=accent, outline="",
+        )
+        self._fill_image = cap

@@ -68,6 +68,12 @@ def main() -> int:
                 (output_dir / name).unlink()
             except OSError:
                 pass
+        # 产物删完，空目录也要一并收掉：不然每跑一次门禁就在 %TEMP% 里
+        # 留一个 `etts-e2e-*`，和文件头那句"成功即清理"不符。
+        try:
+            output_dir.rmdir()
+        except OSError:
+            pass
         print("产物已清理（成功时不留临时文件）")
     else:
         print(f"产物留在：{output_dir}")

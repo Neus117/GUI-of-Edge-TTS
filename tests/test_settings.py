@@ -51,6 +51,32 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(loaded.voice, "")
         self.assertTrue(self.path.with_suffix(".json.bad").exists())
 
+    def test_utf8_bom_is_read_not_discarded(self) -> None:
+        """带 BOM 的 UTF-8 是**正确**的配置，不能当成坏文件扔掉。
+
+        回归判据：读完设置还在，而且没有产生 `.bad`。
+        """
+        payload = json.dumps({"voice": "zh-CN-YunxiNeural"}, ensure_ascii=False)
+        self.path.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+        loaded = settings_mod.Settings.load(self.path)
+        self.assertEqual(loaded.voice, "zh-CN-YunxiNeural")
+        self.assertFalse(self.path.with_suffix(".json.bad").exists())
+
+    def test_utf16_file_is_read(self) -> None:
+        """PowerShell 5.1 的 `Out-File` 默认写 UTF-16LE（带 BOM）。"""
+        payload = json.dumps({"voice": "en-US-AndrewNeural"})
+        self.path.write_bytes(payload.encode("utf-16"))
+        loaded = settings_mod.Settings.load(self.path)
+        self.assertEqual(loaded.voice, "en-US-AndrewNeural")
+
+    def test_undecodable_file_is_archived_not_lost(self) -> None:
+        """既不是 UTF-8 也不是 UTF-16 的内容：留档，不原地丢掉。"""
+        self.path.write_bytes(b"\x80\x81\x82\x83")
+        loaded = settings_mod.Settings.load(self.path)
+        self.assertEqual(loaded.voice, "")
+        self.assertFalse(self.path.exists())
+        self.assertTrue(self.path.with_suffix(".json.bad").exists())
+
     def test_non_dict_json_degrades(self) -> None:
         self.path.write_text("[1, 2, 3]", encoding="utf-8")
         self.assertEqual(settings_mod.Settings.load(self.path).voice, "")
@@ -73,6 +99,35 @@ class RoundTripTests(unittest.TestCase):
         nested = Path(self._folder.name) / "a" / "b" / "settings.json"
         settings_mod.Settings().save(nested)
         self.assertTrue(nested.exists())
+
+    def test_environment_overrides_are_not_persisted(self) -> None:
+        """`ETTS_THEME` 是给截图/探针用的临时覆盖，不能写进用户配置。"""
+        previous_theme = os.environ.get("ETTS_THEME")
+        os.environ["ETTS_THEME"] = "dark"
+        try:
+            settings = settings_mod.Settings().with_environment_overrides()
+            self.assertEqual(settings.theme, "dark")
+            settings.save(self.path)
+            stored = json.loads(self.path.read_text(encoding="utf-8"))
+            # 运行时是 dark，落盘必须是原来的 system
+            self.assertEqual(settings.theme, "dark")
+            self.assertEqual(stored["theme"], settings_mod.THEME_SYSTEM)
+        finally:
+            if previous_theme is None:
+                os.environ.pop("ETTS_THEME", None)
+            else:
+                os.environ["ETTS_THEME"] = previous_theme
+
+    def test_unencodable_setting_cleans_up_temp_file(self) -> None:
+        """孤立代理项写不进 UTF-8：要报错，但不能留下 `.settings-*.tmp`。"""
+        settings = settings_mod.Settings()
+        settings.voice = "\ud800"
+        with self.assertRaises(UnicodeError):
+            settings.save(self.path)
+        leftovers = [
+            p.name for p in Path(self._folder.name).iterdir() if p.name.startswith(".settings-")
+        ]
+        self.assertEqual(leftovers, [])
 
 
 class OutputDirTests(unittest.TestCase):
