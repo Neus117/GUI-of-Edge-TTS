@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="images/Edge-TTS.png" alt="GUI-of-Edge-TTS" width="128">
+<img src="images/Edge-TTS.png" alt="GUI-of-Edge-TTS" width="256">
 
 [**简体中文**](README.md) · [English](README.en.md)
 
