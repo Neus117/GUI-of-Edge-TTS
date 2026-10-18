@@ -1,30 +1,24 @@
-# Byte-compiled / optimized / DLL files
+# 字节码与缓存
 __pycache__/
 *.py[cod]
 *$py.class
-# C extensions
-*.so
-# Distribution / packaging
-.Python
-build/   # 打包时的副产物，不需要
-develop-eggs/
-dist/   # 打包时的副产物，不需要
-downloads/
-eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-*.egg-info/
-.installed.cfg
-*.egg
-# 打包时的副产物，不需要
-.spec
-# Virtual environments
+
+# 打包副产物
+build/
+dist/
+*.spec.bak
+
+# 打包时由 build.ps1 生成的提交哈希（不入库：入库会让产物自报一个旧提交）
+src/gui_of_edge_tts/_build.py
+
+# 虚拟环境
 .venv/
 venv/
 env/
 ENV/
-.edge-tts-env/   # 我的项目自定义了虚拟环境名
-edge-tts-env/   # 理由同上
+edge-tts-env/
+.edge-tts-env/
+
+# 临时产物
+*.tmp
+*.part

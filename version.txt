@@ -1,8 +1,10 @@
-﻿# UTF-8 encoded .rc file
+# UTF-8 encoded .rc file
+# 版本号改了这里，还要改 src/gui_of_edge_tts/version.py 的 APP_VERSION、
+# 以及 README「查看版本」那一行的示例 —— build.ps1 会核对三处一致。
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(1, 0, 0, 0),  # 文件版本
-        prodvers=(1, 0, 0, 0),  # 产品版本
+        filevers=(2, 0, 0, 0),  # 文件版本
+        prodvers=(2, 0, 0, 0),  # 产品版本
         mask=0x3f,
         flags=0x0,
         OS=0x40004,
@@ -14,15 +16,15 @@ VSVersionInfo(
         StringFileInfo([
             StringTable(
                 '040904B0', [
-                StringStruct('CompanyName', 'Neus117 - https://github.com/Neus117/GUI-of-Edge-TTS'),  # 在公司名称中添加URL
+                StringStruct('CompanyName', 'Neus117 - https://github.com/Neus117/GUI-of-Edge-TTS'),
                 StringStruct('FileDescription', 'Graphic user interface of Edge-TTS'),
-                StringStruct('FileVersion', '1.0.0'),
-                StringStruct('ProductName', 'Edge-TTS'),
-                StringStruct('ProductVersion', '1.0.0'),
-                StringStruct('OriginalFilename', 'Edge-TTS.exe'),
-                StringStruct('LegalCopyright', 'Copyright © 2025 Neus117'),
-                StringStruct('LegalTrademarks', 'https://github.com/Neus117/GUI-of-Edge-TTS'),  # 在商标信息中添加URL
-                StringStruct('Comments', 'Graphic user interface of Edge-TTS')
+                StringStruct('FileVersion', '2.0.0'),
+                StringStruct('ProductName', 'GUI-of-Edge-TTS'),
+                StringStruct('ProductVersion', '2.0.0'),
+                StringStruct('OriginalFilename', 'GUI-of-Edge-TTS.exe'),
+                StringStruct('LegalCopyright', 'Copyright © 2026 Neus117'),
+                StringStruct('LegalTrademarks', 'https://github.com/Neus117/GUI-of-Edge-TTS'),
+                StringStruct('Comments', 'Text to speech with word-aligned subtitles, powered by edge-tts')
             ])
         ]),
         VarFileInfo([VarStruct('Translation', [1033, 1200])])

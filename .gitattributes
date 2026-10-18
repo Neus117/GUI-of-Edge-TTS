@@ -1,0 +1,16 @@
+# 源码一律 LF：Windows 上 git 默认把 text 文件转成 CRLF，
+# 于是同一份文件在不同机器上 diff 出整篇差异。
+* text=auto eol=lf
+
+# 二进制资源不要动
+*.ico binary
+*.png binary
+*.jpg binary
+*.exe binary
+*.zip binary
+
+# 这些文件必须保持 LF，否则会出问题：
+#   .ps1 —— *必须*带 UTF-8 BOM，行尾反而不敏感，但统一 LF 更省心
+*.ps1 text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
