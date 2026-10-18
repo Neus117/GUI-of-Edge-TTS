@@ -922,6 +922,11 @@ class Application:
         # 首帧稳定后（空闲时）再预热按钮位图：**不在启动路径上同步做**，
         # 用户点「生成语音」时就能直接命中缓存。
         self._prewarm_after_id = self.root.after(800, self._start_prewarm)
+        # 窗口可能被**外部**直接 `destroy()`（探针、门禁、崩溃路径），不经过
+        # `on_close()`。这时待触发的 after 会留在 Tcl 里，等它触发时命令已经
+        # 被销毁，终端就会出现 `invalid command name "..._prewarm_step"`
+        # （实测在门禁日志里抓到一次）。<Destroy> 在销毁过程中触发，来得及撤。
+        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
         # 首帧布局稳定后记下"用户期望的编辑区高度"——它是这个窗口的基准，
         # 之后每次要在下方多显示一行，都靠加高窗口来腾地方，**不动编辑区**。
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1024,6 +1029,33 @@ class Application:
             )
         except Exception:  # noqa: BLE001 - 预热失败不影响任何功能
             return
+
+    def _on_root_destroy(self, event=None) -> None:
+        """窗口销毁时撤掉所有待触发的 `after`。
+
+        正常的退出走 `on_close()`，那里已经逐项撤过；但探针、门禁和崩溃路径
+        会直接 `root.destroy()`。留下的回调在 Tk 里指向一个已被删除的命令，
+        触发时就会打印 `invalid command name "..._prewarm_step"`（门禁日志里
+        实测抓到过）。
+        """
+        if event is not None and getattr(event, "widget", None) is not self.root:
+            return
+        for attribute in (
+            "_drain_id",
+            "_settle_after_id",
+            "_proxy_save_id",
+            "_proxy_reload_id",
+            "_counts_after_id",
+            "_prewarm_after_id",
+        ):
+            after_id = getattr(self, attribute, None)
+            if after_id is None:
+                continue
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            setattr(self, attribute, None)
 
     # ------------------------------------------------------------------ 构建
 
