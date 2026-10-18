@@ -560,7 +560,8 @@ def _apply_window_icons(window_id: int, handles: Tuple[int, ...]) -> None:
 # --------------------------------------------------------------------------- #
 # 控制台输出（打包成 windowed exe 之后没有 stdout）
 # --------------------------------------------------------------------------- #
-ATTACH_PARENT_PROCESS = -1
+#: ``ATTACH_PARENT_PROCESS`` 不再使用：PyInstaller ``--onefile`` 的直属父进程
+#: 是引导器（没有控制台），挂它没有意义；现在沿父进程链找真正拥有控制台的那一个。
 STD_OUTPUT_HANDLE = -11
 STD_ERROR_HANDLE = -12
 FILE_TYPE_PIPE = 3
@@ -612,45 +613,144 @@ def _stream_from_std_handle(which: int):
         return None
 
 
-def attach_parent_console() -> bool:
-    """让这个进程有地方可写：控制台、或父进程的管道/重定向文件。
+class _PROCESSENTRY32W(ctypes.Structure):
+    """`PROCESSENTRY32W`：Toolhelp 快照里的一条进程记录（用来找父进程）。"""
 
-    返回是否成功。**这是"双击的 windowed exe 里 print() 会炸"的正解**，
-    而且它顺带修掉了一个更隐蔽的形态：父进程用 ``> out.log`` 收集输出时，
-    第一版把它误判成"没有输出方向"，于是程序算完了却一个字都不输出。
-    """
-    if not IS_WINDOWS:
-        return False
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
 
-    # 1) 先试控制台：这样在 cmd / PowerShell 里跑能**实时**看到输出
+
+TH32CS_SNAPPROCESS = 0x00000002
+
+
+def _parent_pid(pid: int) -> int:
+    """查到 ``pid`` 的父进程 PID；查不到返回 0。"""
+    if not IS_WINDOWS or not pid:
+        return 0
     try:
-        ctypes.windll.kernel32.AttachConsole(ATTACH_PARENT_PROCESS)
-    except (AttributeError, OSError):
-        pass
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_PROCESSENTRY32W),
+        ]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_PROCESSENTRY32W),
+        ]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+            return 0
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        found = 0
+        try:
+            if kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                while True:
+                    if int(entry.th32ProcessID) == pid:
+                        found = int(entry.th32ParentProcessID)
+                        break
+                    if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                        break
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return found
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def _ancestor_pids(limit: int = 6):
+    """从直属父进程开始往上列 PID（引导器 → cmd/Windows Terminal）。"""
+    pid = os.getpid()
+    seen = set()
+    for _ in range(limit):
+        parent = _parent_pid(pid)
+        if not parent or parent in seen:
+            return
+        seen.add(parent)
+        yield parent
+        pid = parent
+
+
+def _open_console_streams():
+    """给**已经挂上的**控制台开两个可写流；没有控制台时返回 (None, None)。"""
     try:
         ctypes.windll.kernel32.SetConsoleOutputCP(65001)
     except (AttributeError, OSError):
         pass
     try:
-        console_out = open("CONOUT$", "w", encoding="utf-8", buffering=1)  # noqa: SIM115
-        console_err = open("CONOUT$", "w", encoding="utf-8", buffering=1)  # noqa: SIM115
+        return (
+            open("CONOUT$", "w", encoding="utf-8", buffering=1),  # noqa: SIM115
+            open("CONOUT$", "w", encoding="utf-8", buffering=1),  # noqa: SIM115
+        )
     except OSError:
-        console_out = console_err = None
+        return None, None
 
-    if console_out is not None:
-        sys.stdout, sys.stderr = console_out, console_err
-        return True
 
-    # 2) 没有控制台（重定向/管道）：用父进程留下的标准句柄
+def _find_console_streams():
+    """找一个能挂的控制台：已经有就用自己的，没有就沿父进程链往上找。"""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetConsoleWindow.restype = wintypes.HWND
+        kernel32.AttachConsole.argtypes = [wintypes.DWORD]
+        kernel32.AttachConsole.restype = wintypes.BOOL
+    except (AttributeError, OSError):
+        return None, None
+    if not kernel32.GetConsoleWindow():
+        for ancestor in _ancestor_pids():
+            if kernel32.AttachConsole(ancestor):
+                break
+        else:
+            return None, None
+    return _open_console_streams()
+
+
+def attach_parent_console() -> bool:
+    """让这个进程有地方可写：管道/重定向文件，或控制台。
+
+    **顺序：先管道/文件，后控制台。**
+
+    * ``exe --version > out.txt`` 和 ``... | Out-String`` 必须写进管道/文件；
+      先挂控制台的话，输出跑到屏幕上，重定向拿到一个空文件。
+    * 两条都没有时（PyInstaller ``--onefile`` 的 windowed 包在 cmd 里），
+      直属父进程是**引导器**（没有控制台），``ATTACH_PARENT_PROCESS``
+      挂不上；必须沿父进程链往上找到 cmd/Windows Terminal 的控制台。
+      用户实测：冻结包 ``--help`` 在 cmd 里什么都不打印；用"隐藏控制台 +
+      读屏幕缓冲区"的探针复现了同一个现象。
+    """
+    if not IS_WINDOWS:
+        return False
+
     piped_out = _stream_from_std_handle(STD_OUTPUT_HANDLE)
     piped_err = _stream_from_std_handle(STD_ERROR_HANDLE)
-    if piped_out is None and piped_err is None:
-        return False
+    console_out = console_err = None
+    if piped_out is None or piped_err is None:
+        console_out, console_err = _find_console_streams()
+
     if piped_out is not None:
         sys.stdout = piped_out
+    elif console_out is not None:
+        sys.stdout = console_out
     if piped_err is not None:
         sys.stderr = piped_err
-    return True
+    elif console_err is not None:
+        sys.stderr = console_err
+    return sys.stdout is not None or sys.stderr is not None
 
 
 def console_available() -> bool:
