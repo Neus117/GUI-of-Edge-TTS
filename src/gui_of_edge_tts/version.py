@@ -12,7 +12,7 @@ import sys
 
 APP_NAME = "GUI-of-Edge-TTS"
 APP_DISPLAY_NAME = "Edge-TTS"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 APP_URL = "https://github.com/Neus117/GUI-of-Edge-TTS"
 
 _UNKNOWN_COMMIT = "unknown"
@@ -56,5 +56,5 @@ def _read_build_commit() -> str:
 
 
 def version_string() -> str:
-    """形如 ``Edge-TTS 2.0.0+ae4a6f4``。"""
+    """形如 ``Edge-TTS 2.0.1+ae4a6f4``。"""
     return f"{APP_DISPLAY_NAME} {APP_VERSION}+{_read_build_commit()}"

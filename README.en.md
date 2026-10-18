@@ -64,10 +64,10 @@ the `?` button in the top-right, or `Ctrl+H`.
 | **Rate / volume / pitch** | Not available in 1.0; now accepts `20`, `+20%` and `1.2x`, with a live "original/adjusted" label |
 | **Output folder** | Choose a default folder in Settings and keep it; the main window shows the current folder |
 | **Progress and cancel** | A meaningful readout of seconds generated and bytes received; cancellable, **with no half-written file left behind** |
-| **Results ready to use** | On success the status bar shows both paths plus "Open audio" / "Show in folder"; no blocking success dialog |
+| **Results ready to use** | On success the status bar shows both paths plus "Open audio" / "Output" (which opens the output folder itself); no blocking success dialog |
 | **Usage hints** | First-run strip, shortcut line under the editor, full Help behind `?`; reopening the strip grows the window instead of clipping the footer |
 | **Read / save text** | `Ctrl+O` reads `.txt`/`.md`/`.srt` (GBK fallback); `Ctrl+S` saves |
-| **Smart default file name** | A title is extracted locally, with rate/volume/pitch suffix; still editable |
+| **Smart default file name** | A title is extracted locally, with the chosen voice (`-multi` for multilingual models) and rate/volume/pitch suffixes; still editable |
 | **Settings window** | Proxy, hint switch, config-file location and UI language; applied and saved immediately |
 | **Remembers preferences** | Last voice, parameters and output folder are restored |
 | **Stable windows** | Settings has a fixed size, so language changes do not resize or flash; Help/Settings popups are frozen before first paint; showing the hint strip grows the main window |
@@ -96,7 +96,7 @@ the `?` button in the top-right, or `Ctrl+H`.
 | **Where files go** | You choose when pressing Generate; the default folder is your Music folder (changeable in Settings). Picking `xxx.mp3` also writes `xxx.srt` next to it |
 | **Where settings live** | `%APPDATA%\GUI-of-Edge-TTS\settings.json`. A corrupt file will not stop the program: it is renamed to `settings.json.bad` and defaults are used |
 | **Uninstall** | Delete the exe and that settings folder — nothing else is left behind |
-| **Check the version** | `GUI-of-Edge-TTS.exe --version` prints something like `Edge-TTS 2.0.0+ae4a6f4`; the part after `+` is the commit it was built from |
+| **Check the version** | `GUI-of-Edge-TTS.exe --version` prints something like `Edge-TTS 2.0.1+ae4a6f4`; the part after `+` is the commit it was built from |
 | **Can it work offline?** | No. Speech is synthesised by Microsoft's online service; when the network is down the status bar says so |
 
 <br>
@@ -162,7 +162,7 @@ python tools/check_all.py --offline  # skip the networked one
 |---|---|
 | `add_bom.py --check` | A `.ps1` without a UTF-8 BOM ⇒ Windows PowerShell 5.1 decodes it as GBK and reports bogus syntax errors |
 | `--selftest` | Regressions in pure logic: parameter parsing, subtitle composition, themes, settings I/O |
-| `unittest discover -s tests -t tests` | 164 cases; no window, no network |
+| `unittest discover -s tests -t tests` | 177 cases; no window, no network |
 | `check_forbidden.py` | Hard-coded absolute paths, hard-coded colours, a method defined twice in one class, settings fields nobody reads |
 | `ui_layout_probe.py` | Widgets pushed outside the client area, cards the same colour as the window, gaps off the 4-pixel grid |
 | `e2e_smoke.py` | **The path a real user takes** (networked): real widgets → real Generate button → real event loop → mp3 and srt actually on disk |
@@ -188,7 +188,7 @@ src/gui_of_edge_tts/
   lang.py           UI language: L(), system detection, persisted preference
   settings.py       settings I/O (atomic write, graceful degradation)
   version.py        version and build commit
-tests/              164 unit tests
+tests/              177 unit tests
 tools/              gates, probes, screenshots and the end-to-end smoke test
 ```
 
