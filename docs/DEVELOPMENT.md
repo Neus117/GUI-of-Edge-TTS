@@ -693,8 +693,34 @@ asyncio 终结器排一个 `athrow` 任务去关，而这时 `loop.close()` 已�
 - 取消等待上限 `receive_timeout=20`；提交前再查一次取消；
 - 设置文件接受 UTF-8 BOM / UTF-16，读不出才留档 `.bad`；
 - `ETTS_THEME`/`ETTS_LANG` 不落盘；环境变量覆盖只影响运行期；
-- 冻结态 `--help`：`_ensure_console()` 前置到 `parse_args` 之前；
+- 冻结态 `--help`：`_ensure_console()` 前置到 `parse_args` 之前（为什么还不够，
+  见 14.5）；
 - 多显示器：弹窗按显示器 work area 夹取；图标按窗口 DPI 取尺寸并缓存 HICON。
 
 单测 177 条；12 项门禁全过（含联网 e2e）。
+
+### 14.5 冻结包的 `--help` 在真实控制台没有输出（用户实测，2026-10-18）
+
+**症状**：cmd 里 `dist\GUI-of-Edge-TTS.exe --help` 什么都不打印。
+
+**为什么上一轮"验证通过"是假的**：我是在**没有控制台**的环境里用
+`& exe --help | Out-String` 测的——那走的是"继承管道"这条路，恰好有输出。
+用户是在真实 cmd 里跑的，走的是"挂控制台"那条路。
+
+**根因**：PyInstaller `--onefile` 的窗口程序，直属父进程是**引导器**，
+它没有控制台；`AttachConsole(ATTACH_PARENT_PROCESS)` 必然失败，而
+windowed 启动器又不给标准句柄，argparse 的输出就落到了虚空里。
+
+**修法**（`platform_win.attach_parent_console`）：
+
+1. **优先**用继承来的管道/重定向句柄（`> out.txt`、`| Out-String` 才收得到）；
+2. 缺哪一路，就找控制台补哪一路：先用进程自己的控制台，没有就沿父进程链
+   （Toolhelp 快照查 `th32ParentProcessID`）找到第一个拥有控制台的祖先
+   （cmd / Windows Terminal），`AttachConsole(pid)` 之后再开 `CONOUT$`。
+
+**判据**：新开一个**隐藏控制台**运行 exe，用
+`ReadConsoleOutputCharacterW` 读屏幕缓冲区——`--help` 能看到完整 usage、
+`--version` 能看到版本；`--version > 文件` 则写进文件、控制台为空。
+这三个用例现在是自动化探针，不再靠"管道里能看到"冒充"控制台里能看到"。
+
 
