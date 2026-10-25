@@ -30,9 +30,8 @@ function Write-Step([string]$text) {
 # ---- 1. 找有 edge-tts 的解释器 -------------------------------------------
 $candidates = @()
 if ($Python) { $candidates += $Python }
+$candidates += (Join-Path $repo "etts-dev\python.exe")
 $candidates += (Join-Path $repo "edge-tts-env\python.exe")
-$candidates += "D:\Coding\GUI-of-Edge-TTS\etts-dev\python.exe"
-$candidates += "D:\Coding\GUI-of-Edge-TTS\edge-tts-env\python.exe"
 $candidates += (Join-Path $env:USERPROFILE "miniconda3\envs\edge-tts-env\python.exe")
 $candidates += (Join-Path $env:USERPROFILE "miniconda3\python.exe")
 $command = Get-Command python -ErrorAction SilentlyContinue

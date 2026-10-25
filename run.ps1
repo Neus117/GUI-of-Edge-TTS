@@ -29,9 +29,8 @@ $repo = $PSScriptRoot
 # 本地没有 dist/ 时不必先打印一句"没找到 exe"再回退，直接启动即可。
 function Find-Python {
     $candidates = @(
+        (Join-Path $repo "etts-dev\python.exe"),
         (Join-Path $repo "edge-tts-env\python.exe"),
-        "D:\Coding\GUI-of-Edge-TTS\etts-dev\python.exe",
-        "D:\Coding\GUI-of-Edge-TTS\edge-tts-env\python.exe",
         (Join-Path $env:USERPROFILE "miniconda3\envs\edge-tts-env\python.exe"),
         (Join-Path $env:USERPROFILE "miniconda3\python.exe")
     )

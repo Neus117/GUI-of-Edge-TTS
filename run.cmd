@@ -13,9 +13,8 @@ set "REPO=%~dp0"
 set "ENTRY=%REPO%src\GUI-of-Edge-TTS.py"
 
 set "PY="
-if exist "%REPO%edge-tts-env\python.exe" set "PY=%REPO%edge-tts-env\python.exe"
-if not defined PY if exist "D:\Coding\GUI-of-Edge-TTS\etts-dev\python.exe" set "PY=D:\Coding\GUI-of-Edge-TTS\etts-dev\python.exe"
-if not defined PY if exist "D:\Coding\GUI-of-Edge-TTS\edge-tts-env\python.exe" set "PY=D:\Coding\GUI-of-Edge-TTS\edge-tts-env\python.exe"
+if exist "%REPO%etts-dev\python.exe" set "PY=%REPO%etts-dev\python.exe"
+if not defined PY if exist "%REPO%edge-tts-env\python.exe" set "PY=%REPO%edge-tts-env\python.exe"
 
 if not defined PY (
     echo No usable Python found.  This project needs an interpreter with

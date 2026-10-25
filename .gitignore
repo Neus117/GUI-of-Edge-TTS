@@ -18,6 +18,9 @@ env/
 ENV/
 edge-tts-env/
 .edge-tts-env/
+# 从 D:\Coding\GUI-of-Edge-TTS\etts-dev 迁入的项目解释器（约 180 MB，
+# 不进仓库；run.cmd / run.ps1 / build.ps1 会优先找它）
+etts-dev/
 
 # 临时产物
 *.tmp
